@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     weight_skills: float = 0.4
     weight_education: float = 0.1
 
+    # Uploads
+    max_upload_bytes: int = 10 * 1024 * 1024
+
     # Retrieval
     retrieval_top_k: int = 50
     rerank_top_n: int = 10

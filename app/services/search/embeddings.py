@@ -8,12 +8,11 @@ recall in production.
 """
 import hashlib
 import math
-import re
 from typing import Protocol
 
 from app.config import get_settings
-
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Shared with the sparse index so the dense and sparse halves never tokenize differently.
+from app.services.search.vector_store import tokenize
 
 
 class EmbeddingClient(Protocol):
@@ -28,7 +27,7 @@ class HashEmbeddingClient:
 
     def embed(self, text: str) -> list[float]:
         vector = [0.0] * self._dim
-        for token in _TOKEN_RE.findall(text.lower()):
+        for token in tokenize(text):
             bucket = int(hashlib.md5(token.encode()).hexdigest(), 16) % self._dim
             vector[bucket] += 1.0
 

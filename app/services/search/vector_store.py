@@ -9,6 +9,7 @@ point, combined server-side.
 import hashlib
 import math
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
@@ -16,7 +17,10 @@ from typing import Protocol
 
 from app.config import get_settings
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# `[a-z0-9]+` silently shreds every non-ASCII resume: "José García" becomes
+# ["jos", "garc", "a"] and CJK vanishes outright. \w keeps them whole, and
+# folding combining marks lets "Jose" and "José" match each other.
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 
 # Qdrant sparse indices must be stable across processes. Python's builtin hash()
 # is randomized per interpreter (PYTHONHASHSEED), so a term indexed by a Celery
@@ -25,7 +29,9 @@ _SPARSE_INDEX_SPACE = 2**31
 
 
 def tokenize(text: str) -> list[str]:
-    return _TOKEN_RE.findall(text.lower())
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    folded = "".join(char for char in decomposed if not unicodedata.combining(char))
+    return _TOKEN_RE.findall(folded)
 
 
 def sparse_index(term: str) -> int:

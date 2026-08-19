@@ -115,7 +115,15 @@ task inline in the API process, so the endpoint works with no broker running;
 `celery` dispatches to a real worker over Redis. Both report state through the
 same task endpoint, so client code does not change between them.
 
-A malformed upload returns `422` with the failing filename rather than a `500`.
+A malformed upload returns `422` with the failing filename rather than a `500`;
+one over `MAX_UPLOAD_BYTES` returns `413`. The body is read in chunks and abandoned
+at the cap, so an oversized file is never fully buffered into memory.
+
+Re-uploading the same resume updates that candidate instead of creating a second
+one — identity is a SHA-256 of the whitespace-normalized text, so the same content
+under a different filename resolves to the same candidate. Merging by email (an
+updated resume replacing an older one) is deliberately **not** done here: that is a
+product decision about overwriting history, not an obvious correctness fix.
 
 ## Matching API
 
@@ -168,6 +176,14 @@ outranks the real minimum. Either one quietly fails qualified candidates.
   need a layout-aware backend (Marker/Textract) to preserve reading order.
 
 ## Notes on the search backends
+
+- **Tokenization is Unicode-aware.** `[a-z0-9]+` turned "José García" into
+  `['jos', 'garc', 'a']` and dropped CJK entirely, quietly wrecking retrieval for
+  every non-English resume. Tokens are matched with `\w+` and combining marks are
+  folded, so "Jose" and "José" also match each other. ASCII is unaffected.
+- **The dense and sparse halves share one tokenizer.** `embeddings.py` imports
+  `tokenize` from the vector store rather than keeping its own copy — two
+  definitions would drift and index text differently from how they query it.
 
 - **Hybrid means hybrid.** The Qdrant backend runs the dense and sparse
   branches as separate prefetches and fuses them with Reciprocal Rank Fusion

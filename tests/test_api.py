@@ -166,3 +166,23 @@ def test_eager_task_results_do_not_grow_without_bound():
     finally:
         tasks._EAGER_RESULT_LIMIT = original_limit
         tasks._EAGER_RESULTS.clear()
+
+
+def test_oversized_upload_is_rejected_without_being_buffered():
+    from app.config import get_settings
+
+    settings = get_settings()
+    original, settings.max_upload_bytes = settings.max_upload_bytes, 1024
+    try:
+        response = client.post(
+            "/resumes", files={"file": ("big.txt", b"x" * 5000, "text/plain")}
+        )
+        assert response.status_code == 413
+    finally:
+        settings.max_upload_bytes = original
+
+
+def test_uploads_within_the_cap_still_succeed():
+    assert client.post(
+        "/resumes", files={"file": ("r.txt", SAMPLE_RESUME, "text/plain")}
+    ).status_code == 200

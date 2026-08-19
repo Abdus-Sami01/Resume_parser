@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app.config import get_settings
 from app.db.candidate_store import get_candidate_store
 from app.schemas.candidate import CandidateProfile
 from app.services.extraction.document_parser import get_document_parser
@@ -24,10 +25,20 @@ class ResumeTaskResponse(BaseModel):
 
 
 async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
-    file_bytes = await file.read()
-    if not file_bytes:
+    """Reads in chunks and stops at the cap, so an oversized upload is never fully buffered."""
+    limit = get_settings().max_upload_bytes
+    chunks: list[bytes] = []
+    total = 0
+
+    while chunk := await file.read(64 * 1024):
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(status_code=413, detail=f"file exceeds {limit} bytes")
+        chunks.append(chunk)
+
+    if not total:
         raise HTTPException(status_code=400, detail="empty file")
-    return file_bytes, file.filename or "resume.txt"
+    return b"".join(chunks), file.filename or "resume.txt"
 
 
 @router.post("", response_model=ResumeUploadResponse)

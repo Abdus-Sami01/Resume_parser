@@ -183,3 +183,57 @@ def test_rerank_scores_stay_aligned_with_their_candidates(monkeypatch):
 
     assert by_id["weak"] == 1.0
     assert by_id["strong"] == 0.0
+
+
+def test_reuploading_the_same_resume_updates_rather_than_clones():
+    """Two records for one person would put them in every result list twice."""
+    first = index_candidate(STRONG_CANDIDATE, STRONG_TEXT)
+    second = index_candidate(STRONG_CANDIDATE, STRONG_TEXT)
+
+    assert first == second
+    assert [r.candidate_id for r in match(JOB)] == [first]
+
+
+def test_whitespace_only_differences_are_treated_as_the_same_resume():
+    first = index_candidate(STRONG_CANDIDATE, STRONG_TEXT)
+    second = index_candidate(STRONG_CANDIDATE, f"  {STRONG_TEXT.replace(' ', '  ')}  \n")
+
+    assert first == second
+
+
+def test_a_genuinely_different_resume_gets_its_own_candidate():
+    first = index_candidate(STRONG_CANDIDATE, STRONG_TEXT)
+    second = index_candidate(WEAK_CANDIDATE, WEAK_TEXT)
+
+    assert first != second
+    assert len(match(JOB)) == 2
+
+
+def test_non_ascii_text_survives_tokenization():
+    """`[a-z0-9]+` turned 'José García' into ['jos', 'garc', 'a'] and dropped CJK entirely."""
+    from app.services.search.vector_store import tokenize
+
+    assert tokenize("José García") == ["jose", "garcia"]
+    assert tokenize("Müller Schröder") == ["muller", "schroder"]
+    assert "python" in tokenize("北京大学 Python")
+    assert tokenize("Python FastAPI") == ["python", "fastapi"]  # ASCII unchanged
+
+
+def test_accented_and_unaccented_spellings_match_each_other():
+    from app.services.search.vector_store import tokenize
+
+    assert tokenize("Jose") == tokenize("José")
+
+
+def test_a_candidate_with_an_accented_name_is_retrievable():
+    profile = STRONG_CANDIDATE.model_copy(update={"name": "José García"})
+    index_candidate(profile, "José García. Senior Python engineer with FastAPI and AWS.")
+
+    assert match(JOB)[0].candidate.name == "José García"
+
+
+def test_dense_and_sparse_halves_share_one_tokenizer():
+    """Divergent tokenizers would index and query the same text differently."""
+    from app.services.search import embeddings, vector_store
+
+    assert embeddings.tokenize is vector_store.tokenize

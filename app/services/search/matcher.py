@@ -6,6 +6,7 @@ reranker against the exact job description, then blended with the
 section-weighted structured score (skills/experience/education) for the
 final, explainable ranking.
 """
+import hashlib
 import uuid
 
 from app.config import get_settings
@@ -18,16 +19,33 @@ from app.services.search.reranker import get_reranker
 from app.services.search.vector_store import get_vector_store
 
 
-def index_candidate(profile: CandidateProfile, raw_text: str, candidate_id: str | None = None) -> str:
-    candidate_id = candidate_id or str(uuid.uuid4())
+def content_fingerprint(raw_text: str) -> str:
+    """Stable id for a resume's text, so re-uploading one file does not clone the candidate."""
+    normalized = " ".join(raw_text.split()).lower()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
+
+def index_candidate(profile: CandidateProfile, raw_text: str, candidate_id: str | None = None) -> str:
     embedder = get_embedding_client()
     vector_store = get_vector_store()
     candidate_store = get_candidate_store()
 
+    fingerprint = content_fingerprint(raw_text)
+    # Re-uploading the same resume must update that candidate, not add a second copy
+    # of the same person to every result list.
+    candidate_id = candidate_id or candidate_store.find_by_fingerprint(fingerprint) or str(uuid.uuid4())
+
     searchable_text = _candidate_searchable_text(profile, raw_text)
     dense_vector = embedder.embed(searchable_text)
 
+    # The record is saved first: a failure after this point leaves a candidate that is
+    # merely unindexed, whereas the reverse order leaves a phantom vector that wins a
+    # retrieval slot and then resolves to nothing.
+    candidate_store.save(
+        CandidateRecord(
+            candidate_id=candidate_id, profile=profile, raw_text=raw_text, fingerprint=fingerprint
+        )
+    )
     vector_store.upsert(
         doc_id=candidate_id,
         dense_vector=dense_vector,
@@ -40,7 +58,6 @@ def index_candidate(profile: CandidateProfile, raw_text: str, candidate_id: str 
             "certifications": profile.certifications,
         },
     )
-    candidate_store.save(CandidateRecord(candidate_id=candidate_id, profile=profile, raw_text=raw_text))
 
     return candidate_id
 
