@@ -1,0 +1,31 @@
+# Core API
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+python-multipart>=0.0.9
+email-validator>=2.1
+
+# Structured extraction (production LLM backend)
+instructor>=1.4
+openai>=1.40
+
+# Document parsing (production backend)
+pypdf>=4.2
+python-docx>=1.1
+
+# Skill standardization
+rapidfuzz>=3.9
+
+# Vector search (production backend)
+qdrant-client>=1.9
+
+# Async tasks
+celery>=5.4
+redis>=5.0
+
+# NOTE: sentence-transformers / bge-reranker / spaCy are intentionally left
+# out of the default install. They are large (torch-based) and only needed
+# when EXTRACTION_BACKEND / RERANKER_BACKEND is switched away from the
+# built-in heuristic fallbacks. Install on demand:
+#   pip install sentence-transformers spacy

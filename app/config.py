@@ -1,0 +1,55 @@
+"""Environment-driven settings for every pluggable backend in the pipeline."""
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    # Extraction pipeline
+    extraction_backend: Literal["heuristic", "llm"] = "heuristic"
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+    llm_model: str = "gpt-4o-mini"
+
+    # Vector search pipeline
+    vector_store_backend: Literal["memory", "qdrant"] = "memory"
+    qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str = ""
+    qdrant_collection: str = "resumes"
+
+    # Embeddings
+    embedding_backend: Literal["hash", "openai"] = "hash"
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dim: int = 256
+
+    # Reranking
+    reranker_backend: Literal["lexical", "cross_encoder"] = "lexical"
+    reranker_model: str = "BAAI/bge-reranker-large"
+
+    # Scoring weights
+    weight_experience: float = 0.5
+    weight_skills: float = 0.4
+    weight_education: float = 0.1
+
+    # Retrieval
+    retrieval_top_k: int = 50
+    rerank_top_n: int = 10
+
+    # Celery / Redis
+    redis_url: str = "redis://localhost:6379/0"
+
+    @model_validator(mode="after")
+    def _weights_sum_to_one(self) -> "Settings":
+        total = self.weight_experience + self.weight_skills + self.weight_education
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"scoring weights must sum to 1.0, got {total}")
+        return self
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
