@@ -1,10 +1,12 @@
 from fastapi import APIRouter, HTTPException, UploadFile
 from pydantic import BaseModel
 
+from app.db.candidate_store import get_candidate_store
 from app.schemas.candidate import CandidateProfile
 from app.services.extraction.document_parser import get_document_parser
 from app.services.extraction.resume_extractor import get_resume_extractor
 from app.services.search.matcher import index_candidate
+from app.workers.tasks import get_task_state, submit_resume_parse
 
 router = APIRouter(prefix="/resumes", tags=["resumes"])
 
@@ -14,14 +16,54 @@ class ResumeUploadResponse(BaseModel):
     profile: CandidateProfile
 
 
-@router.post("", response_model=ResumeUploadResponse)
-async def upload_resume(file: UploadFile) -> ResumeUploadResponse:
+class ResumeTaskResponse(BaseModel):
+    task_id: str
+    state: str
+    candidate_id: str | None = None
+    error: str | None = None
+
+
+async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="empty file")
+    return file_bytes, file.filename or "resume.txt"
 
-    raw_text = get_document_parser().parse(file_bytes, file.filename or "resume.txt")
-    profile = get_resume_extractor().extract(raw_text)
+
+@router.post("", response_model=ResumeUploadResponse)
+async def upload_resume(file: UploadFile) -> ResumeUploadResponse:
+    """Parse inline. Fine for plain text; use /resumes/async for heavy PDF or LLM extraction."""
+    file_bytes, filename = await _read_upload(file)
+
+    try:
+        raw_text = get_document_parser().parse(file_bytes, filename)
+        profile = get_resume_extractor().extract(raw_text)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # A corrupt upload is the client's problem to fix, not a server fault.
+        raise HTTPException(status_code=422, detail=f"could not parse {filename}: {exc}") from exc
+
     candidate_id = index_candidate(profile, raw_text)
-
     return ResumeUploadResponse(candidate_id=candidate_id, profile=profile)
+
+
+@router.post("/async", response_model=ResumeTaskResponse, status_code=202)
+async def upload_resume_async(file: UploadFile) -> ResumeTaskResponse:
+    """Dispatch parsing to a worker so slow extraction cannot time out the request."""
+    file_bytes, filename = await _read_upload(file)
+    task_id = submit_resume_parse(file_bytes, filename)
+    return ResumeTaskResponse(**get_task_state(task_id))
+
+
+@router.get("/tasks/{task_id}", response_model=ResumeTaskResponse)
+async def read_task(task_id: str) -> ResumeTaskResponse:
+    return ResumeTaskResponse(**get_task_state(task_id))
+
+
+@router.get("/{candidate_id}", response_model=CandidateProfile)
+async def read_resume(candidate_id: str) -> CandidateProfile:
+    record = get_candidate_store().get(candidate_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    return record.profile

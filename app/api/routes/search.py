@@ -10,8 +10,8 @@ router = APIRouter(prefix="/search", tags=["search"])
 
 class MatchRequest(BaseModel):
     job: JobProfile
-    top_k: int | None = None
-    top_n: int | None = None
+    top_k: int | None = Field(default=None, ge=1, le=1000, description="Stage-1 retrieval depth")
+    top_n: int | None = Field(default=None, ge=1, le=100, description="Candidates returned after reranking")
     filters: dict = Field(
         default_factory=dict,
         description='Hard metadata constraints, e.g. {"skills": ["python"], "location": "Remote"}',

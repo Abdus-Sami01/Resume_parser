@@ -5,6 +5,7 @@ pydantic>=2.7
 pydantic-settings>=2.3
 python-multipart>=0.0.9
 email-validator>=2.1
+cffi>=1.16  # pypdf -> cryptography needs it; a partial install raises an uncatchable PanicException
 
 # Structured extraction (production LLM backend)
 instructor>=1.4

@@ -45,7 +45,7 @@ fallback** implementation. This means:
   lexical-overlap reranking).
 - Swapping in the real production backend (OpenAI/Groq + Instructor, Qdrant,
   a `bge-reranker` cross-encoder) is a one-line change in `app/config.py`
-  (`EXTRACTION_BACKEND`, `VECTOR_STORE_BACKEND`, `RERANKER_BACKEND`), because
+  (`EXTRACTION_BACKEND`, `VECTOR_STORE_BACKEND`, `RERANKER_BACKEND`, `TASK_BACKEND`), because
   the orchestration code only depends on the Protocol, never the concrete
   class.
 
@@ -61,7 +61,7 @@ app/
   services/taxonomy/         skill standardization against a taxonomy
   services/search/           embeddings, vector store, reranker, matcher
   workers/                   Celery app + background tasks
-  db/                        Qdrant client factory
+  db/                        parsed-profile store
 tests/                       pytest suite (runs fully offline via fallbacks)
 scripts/seed_taxonomy.py     loads the bundled skill taxonomy
 docker-compose.yml           Qdrant + Redis for local production-like runs
@@ -82,6 +82,7 @@ export EXTRACTION_BACKEND=llm
 export OPENAI_API_KEY=sk-...
 export VECTOR_STORE_BACKEND=qdrant
 export RERANKER_BACKEND=cross_encoder
+export TASK_BACKEND=celery
 uvicorn app.main:app --reload
 celery -A app.workers.celery_app worker --loglevel=info
 ```
@@ -97,6 +98,22 @@ The test suite exercises schema validation, skill standardization, the
 two-stage matcher, and the API endpoints entirely against the fallback
 (in-process) backends, so it needs no network access, API keys, or running
 services.
+
+## Upload API
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /resumes` | Parse inline and return the profile. Fine for text; can outlast an HTTP timeout under Marker + LLM extraction. |
+| `POST /resumes/async` | Dispatch parsing to a worker, returns `202` with a `task_id`. |
+| `GET /resumes/tasks/{task_id}` | Task state, plus `candidate_id` once it succeeds. |
+| `GET /resumes/{candidate_id}` | Fetch a parsed profile. |
+
+`TASK_BACKEND` picks how `/resumes/async` runs. `eager` (default) executes the
+task inline in the API process, so the endpoint works with no broker running;
+`celery` dispatches to a real worker over Redis. Both report state through the
+same task endpoint, so client code does not change between them.
+
+A malformed upload returns `422` with the failing filename rather than a `500`.
 
 ## Matching API
 

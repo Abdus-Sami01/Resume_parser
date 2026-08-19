@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     rerank_top_n: int = 10
 
     # Celery / Redis
+    # "eager" runs tasks inline in the calling process (no broker needed);
+    # "celery" dispatches to a worker over Redis.
+    task_backend: Literal["eager", "celery"] = "eager"
     redis_url: str = "redis://localhost:6379/0"
 
     @model_validator(mode="after")
