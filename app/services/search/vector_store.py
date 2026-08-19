@@ -82,6 +82,10 @@ class VectorStore(Protocol):
         filters: dict | None = None,
     ) -> list[SearchHit]: ...
 
+    def delete(self, doc_id: str) -> bool: ...
+
+    def count(self) -> int: ...
+
 
 class InMemoryHybridVectorStore:
     """Dependency-free hybrid store: cosine (dense) + BM25 (sparse), combined by weighted sum."""
@@ -125,6 +129,17 @@ class InMemoryHybridVectorStore:
 
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:top_k]
+
+    def delete(self, doc_id: str) -> bool:
+        """Removes a document and un-indexes its terms so document frequencies stay honest."""
+        document = self._docs.pop(doc_id, None)
+        if document is None:
+            return False
+        self._unindex_terms(document.sparse_terms)
+        return True
+
+    def count(self) -> int:
+        return len(self._docs)
 
     def _bm25_like(self, query_terms: list[str], doc_terms: Counter) -> float:
         if not query_terms or not doc_terms:
@@ -221,6 +236,17 @@ class QdrantHybridVectorStore:
             with_payload=True,
         )
         return [SearchHit(id=str(p.id), score=p.score, payload=p.payload or {}) for p in results.points]
+
+    def delete(self, doc_id: str) -> bool:
+        from qdrant_client.models import PointIdsList
+
+        self._client.delete(
+            collection_name=self._collection, points_selector=PointIdsList(points=[doc_id])
+        )
+        return True
+
+    def count(self) -> int:
+        return self._client.count(collection_name=self._collection).count
 
     @staticmethod
     def _build_filter(filters: dict | None):

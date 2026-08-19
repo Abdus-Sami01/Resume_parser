@@ -38,8 +38,21 @@ class CandidateStore:
     def find_by_fingerprint(self, fingerprint: str) -> str | None:
         return self._by_fingerprint.get(fingerprint)
 
+    def delete(self, candidate_id: str) -> bool:
+        record = self._records.pop(candidate_id, None)
+        if record is None:
+            return False
+        if record.fingerprint:
+            self._by_fingerprint.pop(record.fingerprint, None)
+        return True
+
     def all(self) -> list[CandidateRecord]:
         return list(self._records.values())
+
+    def page(self, offset: int = 0, limit: int = 50) -> tuple[list[CandidateRecord], int]:
+        """Returns one page plus the unpaged total, so clients can render "x of y"."""
+        records = self.all()
+        return records[offset : offset + limit], len(records)
 
 
 @lru_cache

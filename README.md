@@ -63,7 +63,7 @@ app/
   services/taxonomy/         skill standardization against a taxonomy
   services/search/           embeddings, vector store, reranker, matcher
   workers/                   Celery app + background tasks
-  db/                        parsed-profile store
+  db/                        candidate + job record stores
 tests/                       pytest suite (runs fully offline via fallbacks)
 scripts/seed_taxonomy.py     loads the bundled skill taxonomy
 docker-compose.yml           Qdrant + Redis for local production-like runs
@@ -101,14 +101,41 @@ two-stage matcher, and the API endpoints entirely against the fallback
 (in-process) backends, so it needs no network access, API keys, or running
 services.
 
-## Upload API
+## API surface
+
+**Candidates**
 
 | Endpoint | Purpose |
 |---|---|
 | `POST /resumes` | Parse inline and return the profile. Fine for text; can outlast an HTTP timeout under Marker + LLM extraction. |
+| `POST /resumes/bulk` | Ingest a batch. Reports per-file outcomes — one unreadable file never discards the rest. |
 | `POST /resumes/async` | Dispatch parsing to a worker, returns `202` with a `task_id`. |
+| `GET /resumes` | Paginated candidate list (`offset`, `limit`) with an unpaged `total`. |
 | `GET /resumes/tasks/{task_id}` | Task state, plus `candidate_id` once it succeeds. |
 | `GET /resumes/{candidate_id}` | Fetch a parsed profile. |
+| `DELETE /resumes/{candidate_id}` | Erase the profile **and** its index entry. |
+| `GET /resumes/{candidate_id}/jobs` | Reverse match: rank stored postings for this candidate. |
+
+**Jobs**
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /jobs/parse` | Parse without persisting — preview how a posting is interpreted. |
+| `POST /jobs` | Parse and persist, returns a `job_id`. |
+| `GET /jobs` | Paginated posting catalogue, newest first. |
+| `GET`/`PUT`/`DELETE /jobs/{job_id}` | Read, replace in place (keeping the id), or remove. |
+| `POST /jobs/{job_id}/match` | Re-run a saved posting against the current candidate pool. |
+
+**Search**
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /search/match` | Match an ad-hoc job profile without persisting it. |
+
+Deletion reaches both stores deliberately. Resumes are personal data, and a
+profile erased from the record store but left in the vector index is still
+discoverable through search — so `DELETE` is not complete until the vector is
+gone too.
 
 `TASK_BACKEND` picks how `/resumes/async` runs. `eager` (default) executes the
 task inline in the API process, so the endpoint works with no broker running;
@@ -144,11 +171,32 @@ be rescued by a high semantic score. Scalar values compare by equality; list
 values require every item to be present. Both backends implement identical
 semantics (in-memory predicate, Qdrant `must` conditions).
 
-## Score breakdown
+## Score breakdown and match evidence
 
-`MatchResult` reports not just a single number but a weighted breakdown
-(`skills`, `experience`, `education`) plus the raw retrieval score and the
-reranker score, so the API response is explainable rather than a black box.
+`MatchResult` reports a weighted `breakdown` (`skills`, `experience`,
+`education`) plus the raw retrieval and reranker scores — and an `evidence`
+object naming what each score was computed from. A bare `0.62` tells a recruiter
+a candidate ranked mid-pack but not why, and not what would change it:
+
+```json
+{
+  "breakdown": { "skills": 0.84, "experience": 1.0, "weighted_total": 0.59, "...": "..." },
+  "evidence": {
+    "skills": {
+      "matched_required": ["fastapi", "postgresql", "python"],
+      "missing_required": [],
+      "matched_preferred": ["aws"],
+      "extra": ["docker"]
+    },
+    "experience": { "candidate_years": 3.92, "required_years": 3.0, "meets_requirement": true },
+    "education":  { "required": "Computer Science", "matched_degree": "B.S.", "meets_requirement": true }
+  }
+}
+```
+
+Evidence is produced by the same functions that compute the scores, returned as
+`(score, evidence)` pairs, so the explanation cannot drift out of sync with the
+number it explains.
 
 `experience` carries the largest weight (0.5 by default), so how tenure is
 counted matters more than anything else in the rubric. The heuristic extractor
@@ -174,6 +222,23 @@ outranks the real minimum. Either one quietly fails qualified candidates.
   so `except Exception` around the parser will not catch it.
 - The bundled parsers handle single-column documents. Multi-column PDFs still
   need a layout-aware backend (Marker/Textract) to preserve reading order.
+
+## Known limitations
+
+- **Stores are in-process.** Candidates and jobs live in memory, so they do not
+  survive a restart and are not shared across API workers. They sit behind small
+  classes (`CandidateStore`, `JobStore`) precisely so a Postgres implementation
+  can replace them without touching the routes.
+- **Reverse matching scans linearly.** `GET /resumes/{id}/jobs` scores every
+  stored posting rather than querying a second index. A deployment holds far
+  fewer open roles than resumes, so this stays cheap — but it is a scan, and it
+  wants its own index if that assumption stops holding.
+- **Deduplication is by exact content.** Re-uploading a byte-identical resume
+  updates one candidate; an edited resume from the same person creates a second.
+  Merging by email is a product decision about overwriting history, so it is
+  left open deliberately.
+- **CJK is not word-segmented.** Tokenization keeps CJK runs intact rather than
+  dropping them, but does not split them into words; that needs a segmenter.
 
 ## Notes on the search backends
 

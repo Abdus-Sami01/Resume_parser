@@ -1,12 +1,14 @@
-from fastapi import APIRouter, HTTPException, UploadFile
+"""Resume endpoints: upload (inline, async, bulk), retrieval, listing, and erasure."""
+from fastapi import APIRouter, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from app.config import get_settings
 from app.db.candidate_store import get_candidate_store
 from app.schemas.candidate import CandidateProfile
+from app.schemas.match import JobMatchResult
 from app.services.extraction.document_parser import get_document_parser
 from app.services.extraction.resume_extractor import get_resume_extractor
-from app.services.search.matcher import index_candidate
+from app.services.search.matcher import delete_candidate, index_candidate, match_jobs_for_candidate
 from app.workers.tasks import get_task_state, submit_resume_parse
 
 router = APIRouter(prefix="/resumes", tags=["resumes"])
@@ -22,6 +24,43 @@ class ResumeTaskResponse(BaseModel):
     state: str
     candidate_id: str | None = None
     error: str | None = None
+
+
+class BulkUploadItem(BaseModel):
+    filename: str
+    candidate_id: str | None = None
+    error: str | None = None
+
+
+class BulkUploadResponse(BaseModel):
+    succeeded: int
+    failed: int
+    items: list[BulkUploadItem]
+
+
+class CandidateSummary(BaseModel):
+    candidate_id: str
+    name: str
+    email: str | None = None
+    skills: list[str]
+    total_years_experience: float
+
+
+class CandidatePage(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    items: list[CandidateSummary]
+
+
+def _summarize(record) -> CandidateSummary:
+    return CandidateSummary(
+        candidate_id=record.candidate_id,
+        name=record.profile.name,
+        email=record.profile.email,
+        skills=record.profile.skills,
+        total_years_experience=record.profile.total_years_experience,
+    )
 
 
 async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
@@ -41,30 +80,66 @@ async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
     return b"".join(chunks), file.filename or "resume.txt"
 
 
-@router.post("", response_model=ResumeUploadResponse)
-async def upload_resume(file: UploadFile) -> ResumeUploadResponse:
-    """Parse inline. Fine for plain text; use /resumes/async for heavy PDF or LLM extraction."""
-    file_bytes, filename = await _read_upload(file)
-
+def _parse_to_profile(file_bytes: bytes, filename: str) -> tuple[CandidateProfile, str]:
     try:
         raw_text = get_document_parser().parse(file_bytes, filename)
-        profile = get_resume_extractor().extract(raw_text)
-    except HTTPException:
-        raise
+        return get_resume_extractor().extract(raw_text), raw_text
     except Exception as exc:
         # A corrupt upload is the client's problem to fix, not a server fault.
         raise HTTPException(status_code=422, detail=f"could not parse {filename}: {exc}") from exc
 
-    candidate_id = index_candidate(profile, raw_text)
-    return ResumeUploadResponse(candidate_id=candidate_id, profile=profile)
+
+@router.post("", response_model=ResumeUploadResponse)
+async def upload_resume(file: UploadFile) -> ResumeUploadResponse:
+    """Parse inline. Fine for plain text; use /resumes/async for heavy PDF or LLM extraction."""
+    file_bytes, filename = await _read_upload(file)
+    profile, raw_text = _parse_to_profile(file_bytes, filename)
+    return ResumeUploadResponse(
+        candidate_id=index_candidate(profile, raw_text), profile=profile
+    )
+
+
+@router.post("/bulk", response_model=BulkUploadResponse)
+async def upload_resumes_bulk(files: list[UploadFile]) -> BulkUploadResponse:
+    """Ingests a batch, reporting per-file outcomes.
+
+    One unreadable file in a batch of two hundred must not discard the other
+    hundred and ninety-nine, so failures are collected rather than raised.
+    """
+    items: list[BulkUploadItem] = []
+
+    for file in files:
+        filename = file.filename or "resume.txt"
+        try:
+            file_bytes, filename = await _read_upload(file)
+            profile, raw_text = _parse_to_profile(file_bytes, filename)
+            items.append(
+                BulkUploadItem(filename=filename, candidate_id=index_candidate(profile, raw_text))
+            )
+        except HTTPException as exc:
+            items.append(BulkUploadItem(filename=filename, error=str(exc.detail)))
+
+    succeeded = sum(1 for item in items if item.candidate_id)
+    return BulkUploadResponse(
+        succeeded=succeeded, failed=len(items) - succeeded, items=items
+    )
 
 
 @router.post("/async", response_model=ResumeTaskResponse, status_code=202)
 async def upload_resume_async(file: UploadFile) -> ResumeTaskResponse:
     """Dispatch parsing to a worker so slow extraction cannot time out the request."""
     file_bytes, filename = await _read_upload(file)
-    task_id = submit_resume_parse(file_bytes, filename)
-    return ResumeTaskResponse(**get_task_state(task_id))
+    return ResumeTaskResponse(**get_task_state(submit_resume_parse(file_bytes, filename)))
+
+
+@router.get("", response_model=CandidatePage)
+async def list_resumes(
+    offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200)
+) -> CandidatePage:
+    records, total = get_candidate_store().page(offset=offset, limit=limit)
+    return CandidatePage(
+        total=total, offset=offset, limit=limit, items=[_summarize(r) for r in records]
+    )
 
 
 @router.get("/tasks/{task_id}", response_model=ResumeTaskResponse)
@@ -78,3 +153,20 @@ async def read_resume(candidate_id: str) -> CandidateProfile:
     if record is None:
         raise HTTPException(status_code=404, detail="candidate not found")
     return record.profile
+
+
+@router.delete("/{candidate_id}", status_code=204)
+async def erase_resume(candidate_id: str) -> None:
+    """Erases the profile and its index entry — resumes are personal data."""
+    if not delete_candidate(candidate_id):
+        raise HTTPException(status_code=404, detail="candidate not found")
+
+
+@router.get("/{candidate_id}/jobs", response_model=list[JobMatchResult])
+async def match_jobs(
+    candidate_id: str, top_n: int | None = Query(None, ge=1, le=100)
+) -> list[JobMatchResult]:
+    """Reverse match: rank stored postings for this candidate."""
+    if get_candidate_store().get(candidate_id) is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    return match_jobs_for_candidate(candidate_id, top_n=top_n)

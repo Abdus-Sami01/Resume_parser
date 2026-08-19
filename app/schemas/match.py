@@ -1,7 +1,45 @@
-"""Match result schema — the explainable score breakdown returned by the API."""
-from pydantic import BaseModel
+"""Match result schemas — the explainable breakdown returned by the API.
+
+A bare score tells a recruiter a candidate ranked 0.62 but not why, and not what
+would change it. Every component therefore ships the evidence it was computed
+from: which required skills were present, which were missing, how the candidate's
+tenure compared to the bar, and whether the education requirement was met.
+"""
+from pydantic import BaseModel, Field
 
 from app.schemas.candidate import CandidateProfile
+
+
+class SkillEvidence(BaseModel):
+    matched_required: list[str] = Field(default_factory=list)
+    missing_required: list[str] = Field(default_factory=list)
+    matched_preferred: list[str] = Field(default_factory=list)
+    missing_preferred: list[str] = Field(default_factory=list)
+    extra: list[str] = Field(
+        default_factory=list, description="Candidate skills the posting never asked for"
+    )
+
+    @property
+    def meets_all_required(self) -> bool:
+        return not self.missing_required
+
+
+class ExperienceEvidence(BaseModel):
+    candidate_years: float
+    required_years: float
+    meets_requirement: bool
+
+
+class EducationEvidence(BaseModel):
+    required: str = ""
+    matched_degree: str | None = None
+    meets_requirement: bool = True
+
+
+class MatchEvidence(BaseModel):
+    skills: SkillEvidence
+    experience: ExperienceEvidence
+    education: EducationEvidence
 
 
 class ScoreBreakdown(BaseModel):
@@ -17,6 +55,20 @@ class MatchResult(BaseModel):
     candidate_id: str
     candidate: CandidateProfile
     breakdown: ScoreBreakdown
+    evidence: MatchEvidence
+
+    @property
+    def final_score(self) -> float:
+        return self.breakdown.weighted_total
+
+
+class JobMatchResult(BaseModel):
+    """The reverse direction: one candidate scored against a stored posting."""
+
+    job_id: str
+    job_title: str
+    breakdown: ScoreBreakdown
+    evidence: MatchEvidence
 
     @property
     def final_score(self) -> float:

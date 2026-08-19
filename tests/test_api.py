@@ -186,3 +186,161 @@ def test_uploads_within_the_cap_still_succeed():
     assert client.post(
         "/resumes", files={"file": ("r.txt", SAMPLE_RESUME, "text/plain")}
     ).status_code == 200
+
+
+# --- Bulk ingestion -------------------------------------------------------
+
+BOB_RESUME = b"Bob Ray\nbob@x.com\nGraphic Designer, Studio Ltd, 2015 - 2020\nSkills: Photoshop\n"
+
+
+def test_bulk_upload_reports_per_file_outcomes():
+    response = client.post(
+        "/resumes/bulk",
+        files=[
+            ("files", ("jane.txt", SAMPLE_RESUME, "text/plain")),
+            ("files", ("bob.txt", BOB_RESUME, "text/plain")),
+        ],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["succeeded"] == 2
+    assert body["failed"] == 0
+    assert all(item["candidate_id"] for item in body["items"])
+
+
+def test_one_bad_file_does_not_discard_the_rest_of_the_batch():
+    """A single unreadable resume must not cost the other files in the upload."""
+    response = client.post(
+        "/resumes/bulk",
+        files=[
+            ("files", ("jane.txt", SAMPLE_RESUME, "text/plain")),
+            ("files", ("broken.pdf", b"not a pdf", "application/pdf")),
+            ("files", ("bob.txt", BOB_RESUME, "text/plain")),
+        ],
+    )
+
+    body = response.json()
+    assert body["succeeded"] == 2
+    assert body["failed"] == 1
+
+    failed = next(item for item in body["items"] if item["error"])
+    assert failed["filename"] == "broken.pdf"
+    assert failed["candidate_id"] is None
+
+
+# --- Listing and pagination -----------------------------------------------
+
+
+def test_candidates_can_be_listed_with_pagination():
+    for index in range(3):
+        client.post(
+            "/resumes",
+            files={"file": (f"r{index}.txt", f"Person {index}\np{index}@x.com\n2 years of Python.\n".encode(), "text/plain")},
+        )
+
+    page = client.get("/resumes?offset=0&limit=2").json()
+
+    assert page["total"] == 3
+    assert page["limit"] == 2
+    assert len(page["items"]) == 2
+
+    second = client.get("/resumes?offset=2&limit=2").json()
+    assert len(second["items"]) == 1
+
+
+@pytest.mark.parametrize("query", ["?limit=0", "?limit=500", "?offset=-1"])
+def test_listing_rejects_out_of_range_paging(query):
+    assert client.get(f"/resumes{query}").status_code == 422
+
+
+# --- Erasure --------------------------------------------------------------
+
+
+def test_deleting_a_candidate_removes_them_from_search_too():
+    """Erasure that leaves the vector behind still exposes the person in results."""
+    candidate_id = client.post(
+        "/resumes", files={"file": ("r.txt", SAMPLE_RESUME, "text/plain")}
+    ).json()["candidate_id"]
+    job = client.post("/jobs", json=SAMPLE_JD).json()
+
+    assert client.post(f"/jobs/{job['job_id']}/match").json()
+
+    assert client.delete(f"/resumes/{candidate_id}").status_code == 204
+    assert client.get(f"/resumes/{candidate_id}").status_code == 404
+    assert client.post(f"/jobs/{job['job_id']}/match").json() == []
+
+
+def test_deleting_an_unknown_candidate_is_a_404():
+    assert client.delete("/resumes/does-not-exist").status_code == 404
+
+
+# --- Job catalogue --------------------------------------------------------
+
+
+def test_job_can_be_created_read_and_listed():
+    created = client.post("/jobs", json=SAMPLE_JD)
+    assert created.status_code == 201
+
+    job_id = created.json()["job_id"]
+    assert client.get(f"/jobs/{job_id}").json()["profile"]["title"] == "Backend Engineer"
+    assert client.get("/jobs").json()["total"] == 1
+
+
+def test_job_can_be_replaced_in_place():
+    job_id = client.post("/jobs", json=SAMPLE_JD).json()["job_id"]
+
+    updated = client.put(
+        f"/jobs/{job_id}",
+        json={"title": "Staff Engineer", "description": "Required:\nGolang\n"},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["job_id"] == job_id  # same id, not a new posting
+    assert updated.json()["profile"]["title"] == "Staff Engineer"
+    assert client.get("/jobs").json()["total"] == 1
+
+
+def test_job_can_be_deleted():
+    job_id = client.post("/jobs", json=SAMPLE_JD).json()["job_id"]
+
+    assert client.delete(f"/jobs/{job_id}").status_code == 204
+    assert client.get(f"/jobs/{job_id}").status_code == 404
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [("get", "/jobs/nope"), ("delete", "/jobs/nope"), ("post", "/jobs/nope/match")],
+)
+def test_unknown_job_is_a_404(method, path):
+    assert getattr(client, method)(path).status_code == 404
+
+
+def test_stored_job_can_be_rerun_against_the_current_pool():
+    job_id = client.post("/jobs", json=SAMPLE_JD).json()["job_id"]
+    assert client.post(f"/jobs/{job_id}/match").json() == []
+
+    client.post("/resumes", files={"file": ("r.txt", SAMPLE_RESUME, "text/plain")})
+
+    assert len(client.post(f"/jobs/{job_id}/match").json()) == 1
+
+
+# --- Reverse matching -----------------------------------------------------
+
+
+def test_candidate_can_be_matched_against_stored_jobs():
+    candidate_id = client.post(
+        "/resumes", files={"file": ("r.txt", SAMPLE_RESUME, "text/plain")}
+    ).json()["candidate_id"]
+    client.post("/jobs", json=SAMPLE_JD)
+    client.post("/jobs", json={"title": "Designer", "description": "Required:\nPhotoshop\n"})
+
+    results = client.get(f"/resumes/{candidate_id}/jobs").json()
+
+    assert len(results) == 2
+    assert results[0]["job_title"] == "Backend Engineer"  # the Python role outranks Designer
+    assert results[0]["breakdown"]["weighted_total"] > results[1]["breakdown"]["weighted_total"]
+
+
+def test_reverse_match_for_unknown_candidate_is_a_404():
+    assert client.get("/resumes/nope/jobs").status_code == 404

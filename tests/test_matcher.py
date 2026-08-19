@@ -237,3 +237,136 @@ def test_dense_and_sparse_halves_share_one_tokenizer():
     from app.services.search import embeddings, vector_store
 
     assert embeddings.tokenize is vector_store.tokenize
+
+
+# --- Match evidence -------------------------------------------------------
+
+
+def test_evidence_names_the_skills_behind_the_score():
+    """A bare 0.62 tells a recruiter nothing about what is missing."""
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+
+    evidence = match(JOB)[0].evidence.skills
+
+    assert set(evidence.matched_required) == {"python", "fastapi", "postgresql"}
+    assert evidence.missing_required == []
+    assert evidence.matched_preferred == ["aws"]
+    assert "docker" in evidence.extra  # held but never asked for
+    assert evidence.meets_all_required is True
+
+
+def test_evidence_lists_what_a_weak_candidate_is_missing():
+    index_candidate(WEAK_CANDIDATE, WEAK_TEXT, candidate_id="weak")
+
+    evidence = match(JOB)[0].evidence.skills
+
+    assert evidence.matched_required == []
+    assert set(evidence.missing_required) == {"python", "fastapi", "postgresql"}
+    assert evidence.meets_all_required is False
+
+
+def test_experience_evidence_reports_both_sides_of_the_comparison():
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+
+    evidence = match(JOB)[0].evidence.experience
+
+    assert evidence.candidate_years == 6.0
+    assert evidence.required_years == 3.0
+    assert evidence.meets_requirement is True
+
+
+def test_education_evidence_records_the_degree_that_satisfied_the_requirement():
+    from app.schemas.candidate import Education
+
+    graduate = STRONG_CANDIDATE.model_copy(
+        update={"education": [Education(institution="Stanford", degree="B.S.", field_of_study="Computer Science")]}
+    )
+    job = JOB.model_copy(update={"required_education": "Computer Science"})
+    index_candidate(graduate, STRONG_TEXT, candidate_id="grad")
+
+    evidence = match(job)[0].evidence.education
+
+    assert evidence.meets_requirement is True
+    assert evidence.matched_degree == "B.S."
+
+
+def test_education_evidence_flags_an_unmet_requirement():
+    job = JOB.model_copy(update={"required_education": "Computer Science"})
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="no-degree")
+
+    evidence = match(job)[0].evidence.education
+
+    assert evidence.meets_requirement is False
+    assert evidence.matched_degree is None
+
+
+# --- Erasure and reverse matching -----------------------------------------
+
+
+def test_delete_candidate_clears_both_stores():
+    from app.db.candidate_store import get_candidate_store
+    from app.services.search.matcher import delete_candidate
+    from app.services.search.vector_store import get_vector_store
+
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="doomed")
+    assert get_vector_store().count() == 1
+
+    assert delete_candidate("doomed") is True
+    assert get_candidate_store().get("doomed") is None
+    assert get_vector_store().count() == 0
+    assert match(JOB) == []
+
+
+def test_deleting_an_absent_candidate_reports_false():
+    from app.services.search.matcher import delete_candidate
+
+    assert delete_candidate("never-existed") is False
+
+
+def test_deleting_a_document_restores_term_document_frequencies():
+    """Stale document frequencies would skew every later BM25 score."""
+    from app.services.search.vector_store import InMemoryHybridVectorStore
+
+    store = InMemoryHybridVectorStore()
+    store.upsert("a", [1.0], "python engineer", {})
+    store.upsert("b", [1.0], "python designer", {})
+    assert store._doc_freq["python"] == 2
+
+    store.delete("a")
+    assert store._doc_freq["python"] == 1
+    assert store.count() == 1
+
+
+def test_reverse_match_ranks_stored_jobs_for_a_candidate():
+    from app.db.job_store import get_job_store
+    from app.services.search.matcher import match_jobs_for_candidate
+
+    job_store = get_job_store()
+    backend = job_store.save(JOB)
+    design = job_store.save(
+        JobProfile(title="Designer", required_skills=["photoshop"], description="Photoshop work")
+    )
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+
+    results = match_jobs_for_candidate("strong")
+
+    assert [r.job_id for r in results] == [backend.job_id, design.job_id]
+    assert results[0].evidence.skills.missing_required == []
+
+
+def test_reverse_match_returns_nothing_without_stored_jobs():
+    from app.services.search.matcher import match_jobs_for_candidate
+
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+    assert match_jobs_for_candidate("strong") == []
+
+
+def test_updating_a_stored_job_keeps_its_creation_time():
+    from app.db.job_store import get_job_store
+
+    store = get_job_store()
+    original = store.save(JOB)
+    updated = store.save(JOB.model_copy(update={"title": "Staff Engineer"}), job_id=original.job_id)
+
+    assert updated.created_at == original.created_at
+    assert len(store.all()) == 1

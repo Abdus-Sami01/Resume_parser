@@ -65,4 +65,7 @@ def test_a_qualified_candidate_is_not_penalised_by_unrelated_year_mentions():
     job = HeuristicJobExtractor().extract("Backend Engineer", jd)
     candidate = CandidateProfile(name="X", experience=[Experience(company="A", role="B", years=4)])
 
-    assert _experience_score(job, candidate) == 1.0
+    score, evidence = _experience_score(job, candidate)
+    assert score == 1.0
+    assert evidence.required_years == 3.0
+    assert evidence.meets_requirement is True
