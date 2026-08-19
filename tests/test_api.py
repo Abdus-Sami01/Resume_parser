@@ -150,3 +150,19 @@ def test_parsed_profile_can_be_fetched_by_candidate_id():
 def test_out_of_range_retrieval_params_are_rejected(params):
     job = client.post("/jobs/parse", json=SAMPLE_JD).json()
     assert client.post("/search/match", json={"job": job, **params}).status_code == 422
+
+
+def test_eager_task_results_do_not_grow_without_bound():
+    """The API process is long-lived, so nothing else would ever evict these."""
+    from app.workers import tasks
+
+    monkey_limit = 5
+    original_limit, tasks._EAGER_RESULT_LIMIT = tasks._EAGER_RESULT_LIMIT, monkey_limit
+    tasks._EAGER_RESULTS.clear()
+    try:
+        for _ in range(monkey_limit + 3):
+            client.post("/resumes/async", files={"file": ("r.txt", SAMPLE_RESUME, "text/plain")})
+        assert len(tasks._EAGER_RESULTS) == monkey_limit
+    finally:
+        tasks._EAGER_RESULT_LIMIT = original_limit
+        tasks._EAGER_RESULTS.clear()

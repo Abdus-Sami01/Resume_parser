@@ -6,7 +6,7 @@ parsers here are dependency-light and good enough for single-column text and
 for tests; swap `get_document_parser()` to a Marker/Textract-backed
 implementation for production multi-column PDFs.
 """
-from typing import Protocol
+from typing import Iterator, Protocol
 
 
 class DocumentParser(Protocol):
@@ -39,24 +39,36 @@ class PlainTextFallbackParser:
 
         from docx import Document
 
-        doc = Document(BytesIO(file_bytes))
-        return "\n".join(p.text for p in doc.paragraphs)
+        document = Document(BytesIO(file_bytes))
+        return "\n".join(_iter_docx_blocks(document))
 
 
-class MarkerParser:
-    """Layout-aware PDF -> Markdown conversion via the `marker` package.
+def _iter_docx_blocks(container) -> Iterator[str]:
+    """Walks a docx body in document order, descending into tables.
 
-    Requires `pip install marker-pdf`. Not installed by default because it
-    pulls in a full deep-learning stack; this class is the production swap-in.
+    `Document.paragraphs` skips table cells entirely, so a resume laid out in a
+    table yields nothing but the name — every skill and role silently dropped
+    with no error to notice.
     """
+    from docx.document import Document as DocxDocument
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
-    def parse(self, file_bytes: bytes, filename: str) -> str:
-        from marker.convert import convert_single_pdf  # type: ignore
-        from marker.models import load_all_models  # type: ignore
+    element = container.element.body if isinstance(container, DocxDocument) else container._tc
 
-        models = load_all_models()
-        text, *_ = convert_single_pdf(file_bytes, models)
-        return text
+    for child in element.iterchildren():
+        if child.tag == qn("w:p"):
+            text = Paragraph(child, container).text.strip()
+            if text:
+                yield text
+        elif child.tag == qn("w:tbl"):
+            for row in Table(child, container).rows:
+                # Cells are joined on one line so a role and its dates stay together.
+                cells = [" ".join(_iter_docx_blocks(cell)).strip() for cell in row.cells]
+                line = " ".join(cell for cell in cells if cell).strip()
+                if line:
+                    yield line
 
 
 def get_document_parser() -> DocumentParser:

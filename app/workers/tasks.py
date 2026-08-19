@@ -4,6 +4,7 @@ Marker-class PDF parsing plus an LLM extraction call can take tens of seconds,
 which is longer than a typical HTTP timeout, so uploads are dispatched here
 rather than handled inline.
 """
+from collections import OrderedDict
 from typing import Any
 
 from app.config import get_settings
@@ -13,8 +14,10 @@ from app.services.search.matcher import index_candidate
 from app.workers.celery_app import celery_app
 
 # Eager mode has no result backend to query later, so completed runs are kept here
-# to give the status endpoint identical behaviour in both modes.
-_EAGER_RESULTS: dict[str, dict[str, Any]] = {}
+# to give the status endpoint identical behaviour in both modes. Bounded because
+# an API process is long-lived and nothing else would ever evict these.
+_EAGER_RESULT_LIMIT = 1000
+_EAGER_RESULTS: OrderedDict[str, dict[str, Any]] = OrderedDict()
 
 
 @celery_app.task(name="app.workers.tasks.parse_and_index_resume")
@@ -29,9 +32,15 @@ def submit_resume_parse(file_bytes: bytes, filename: str) -> str:
     async_result = parse_and_index_resume.delay(file_bytes, filename)
 
     if get_settings().task_backend == "eager":
-        _EAGER_RESULTS[async_result.id] = _describe(async_result)
+        _remember_eager_result(async_result)
 
     return async_result.id
+
+
+def _remember_eager_result(async_result: Any) -> None:
+    _EAGER_RESULTS[async_result.id] = _describe(async_result)
+    while len(_EAGER_RESULTS) > _EAGER_RESULT_LIMIT:
+        _EAGER_RESULTS.popitem(last=False)
 
 
 def get_task_state(task_id: str) -> dict[str, Any]:

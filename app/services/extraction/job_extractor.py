@@ -9,6 +9,13 @@ from app.services.taxonomy.skill_standardizer import get_skill_standardizer
 _REQUIRED_HEADERS = re.compile(r"(required|must[- ]have|minimum qualifications)", re.IGNORECASE)
 _PREFERRED_HEADERS = re.compile(r"(preferred|nice[- ]to[- ]have|bonus)", re.IGNORECASE)
 _YEARS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*years?", re.IGNORECASE)
+# The gap before the experience keyword must not cross a digit or a sentence
+# boundary, or "founded 15 years ago. We want 3+ years of experience" matches 15.
+_EXPERIENCE_YEARS_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*\+?\s*years?(?:\s+(?:of|in|with))?[^\d.]{0,25}?"
+    r"\b(?:experience|exp|background|hands[- ]on)\b",
+    re.IGNORECASE,
+)
 _REMOTE_RE = re.compile(r"\bremote\b", re.IGNORECASE)
 
 
@@ -29,8 +36,7 @@ class HeuristicJobExtractor:
         preferred_skills = self._standardizer.extract_and_standardize(preferred_section)
         preferred_skills = [s for s in preferred_skills if s not in required_skills]
 
-        years_matches = _YEARS_RE.findall(raw_text)
-        min_years = max((float(y) for y in years_matches), default=0.0)
+        min_years = self._extract_min_years(required_section, raw_text)
 
         settings = get_settings()
         return JobProfile(
@@ -47,6 +53,22 @@ class HeuristicJobExtractor:
                 education=settings.weight_education,
             ),
         )
+
+    @staticmethod
+    def _extract_min_years(required_section: str, raw_text: str) -> float:
+        """Reads the experience bar from the requirements only.
+
+        Scanning the whole posting lets unrelated prose set the bar — "a company
+        with 20 years of history" turns a 3-year requirement into a 20-year one,
+        and a "preferred" nice-to-have outranks the actual minimum. Both silently
+        penalise qualified candidates on the heaviest-weighted score component.
+        """
+        if required_section.strip():
+            # Everything here is a stated requirement, so the highest bar governs.
+            return max((float(y) for y in _YEARS_RE.findall(required_section)), default=0.0)
+
+        # No requirements block to scope to, so only count years tied to experience wording.
+        return max((float(y) for y in _EXPERIENCE_YEARS_RE.findall(raw_text)), default=0.0)
 
     @staticmethod
     def _split_sections(raw_text: str) -> tuple[str, str]:

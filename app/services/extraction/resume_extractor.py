@@ -32,6 +32,8 @@ _CERT_HEADER_RE = re.compile(r"^\s*certification[s]?\s*:?\s*$", re.IGNORECASE)
 _CERT_INLINE_RE = re.compile(r"^\s*certification[s]?\s*:\s*(.+)$", re.IGNORECASE)
 _CERT_PHRASE_RE = re.compile(r"\bcertified\b|\bcertificate\b", re.IGNORECASE)
 _SECTION_HEADER_RE = re.compile(r"^\s*[A-Z][A-Za-z ]{2,30}\s*:?\s*$")
+# A table-laid-out docx puts its label column inline ("Experience: Senior Engineer").
+_LEADING_LABEL_RE = re.compile(r"^\s*[A-Za-z][A-Za-z ]{0,20}:\s*")
 
 _MONTH_NAMES = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 _MONTH_INDEX = {name: index for index, name in enumerate(_MONTH_NAMES, start=1)}
@@ -153,6 +155,7 @@ class HeuristicResumeExtractor:
 
     @staticmethod
     def _split_role_and_company(remainder: str) -> tuple[str, str]:
+        remainder = _LEADING_LABEL_RE.sub("", remainder.strip())
         segments = [s.strip(" ,;|-–—()") for s in re.split(r"[,;|]|\s[-–—]\s", remainder)]
         segments = [s for s in segments if s]
         if not segments:

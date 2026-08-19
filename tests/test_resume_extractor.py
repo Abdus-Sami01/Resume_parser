@@ -109,3 +109,47 @@ def test_open_ended_role_runs_to_today():
 
 def test_resume_with_no_experience_signal_yields_none():
     assert HeuristicResumeExtractor().extract("Cal\nHobbyist.\n").experience == []
+
+
+def _build_table_docx() -> bytes:
+    """Resumes laid out in tables are common, and `Document.paragraphs` skips table cells."""
+    pytest.importorskip("docx")
+    from io import BytesIO
+
+    from docx import Document
+
+    document = Document()
+    document.add_paragraph("Jane Doe")
+    document.add_paragraph("jane.doe@example.com")
+
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Skills:"
+    table.cell(0, 1).text = "Python, FastAPI, AWS, Kubernetes"
+    table.cell(1, 0).text = "Experience:"
+    table.cell(1, 1).text = "Senior Backend Engineer, Acme Corp, Jan 2019 - Dec 2022"
+
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def test_docx_table_cells_are_not_dropped():
+    from app.services.extraction.document_parser import PlainTextFallbackParser
+
+    text = PlainTextFallbackParser().parse(_build_table_docx(), "table.docx")
+
+    assert "Python" in text
+    assert "Acme Corp" in text
+
+
+def test_table_laid_out_resume_still_yields_a_full_profile():
+    from app.services.extraction.document_parser import PlainTextFallbackParser
+
+    text = PlainTextFallbackParser().parse(_build_table_docx(), "table.docx")
+    profile = HeuristicResumeExtractor().extract(text)
+
+    assert "python" in profile.skills
+    assert "kubernetes" in profile.skills
+    assert profile.experience[0].role == "Senior Backend Engineer"
+    assert profile.experience[0].company == "Acme Corp"
+    assert profile.experience[0].years > 3

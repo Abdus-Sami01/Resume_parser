@@ -1,5 +1,7 @@
 # Resume Parser & Semantic Matching Platform
 
+[![CI](https://github.com/Abdus-Sami01/Resume_parser/actions/workflows/ci.yml/badge.svg)](https://github.com/Abdus-Sami01/Resume_parser/actions/workflows/ci.yml)
+
 A production-shaped implementation of a two-pipeline resume intelligence system:
 
 1. **Ingestion / Parsing Pipeline** — turns messy resume files (PDF/DOCX) and job
@@ -147,6 +149,23 @@ single "N years" mention understates anyone who lists roles individually, and
 misses resumes written purely as date ranges (`Jan 2019 - Dec 2022`), which is
 most of them. A self-reported "N years" phrase is used only as a fallback when
 there are no dates to work from.
+
+The job side reads its experience bar from the requirements block alone. Scanning
+a whole posting lets unrelated prose set it — "a company with 20 years of history"
+turns a 3-year requirement into a 20-year one, and a "preferred" nice-to-have
+outranks the real minimum. Either one quietly fails qualified candidates.
+
+## Notes on document parsing
+
+- **DOCX tables are walked, not skipped.** `Document.paragraphs` omits table
+  cells, so a resume laid out in a table yields nothing but the name — every
+  skill and role dropped with no error raised. The parser walks the body in
+  document order and descends into tables (and nested tables) instead.
+- **`cffi` is pinned** because `pypdf` reaches `cryptography`, and a partial
+  install raises PyO3's `PanicException`, which derives from `BaseException` —
+  so `except Exception` around the parser will not catch it.
+- The bundled parsers handle single-column documents. Multi-column PDFs still
+  need a layout-aware backend (Marker/Textract) to preserve reading order.
 
 ## Notes on the search backends
 
