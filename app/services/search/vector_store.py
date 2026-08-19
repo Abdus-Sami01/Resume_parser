@@ -6,6 +6,7 @@ and small deployments. "qdrant" is the production backend: a single Qdrant
 collection with both a dense vector and a sparse (BM25-style) vector per
 point, combined server-side.
 """
+import hashlib
 import math
 import re
 from collections import Counter
@@ -17,9 +18,36 @@ from app.config import get_settings
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+# Qdrant sparse indices must be stable across processes. Python's builtin hash()
+# is randomized per interpreter (PYTHONHASHSEED), so a term indexed by a Celery
+# worker would land on a different index than the same term at query time.
+_SPARSE_INDEX_SPACE = 2**31
+
 
 def tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text.lower())
+
+
+def sparse_index(term: str) -> int:
+    """Deterministic, process-stable index for a sparse-vector term."""
+    digest = hashlib.blake2b(term.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") % _SPARSE_INDEX_SPACE
+
+
+def payload_matches_filters(payload: dict, filters: dict | None) -> bool:
+    """Scalar values compare by equality; list values require every item to be present."""
+    if not filters:
+        return True
+
+    for key, expected in filters.items():
+        actual = payload.get(key)
+        if isinstance(expected, list):
+            if not isinstance(actual, list) or any(item not in actual for item in expected):
+                return False
+        elif actual != expected:
+            return False
+
+    return True
 
 
 @dataclass
@@ -40,7 +68,13 @@ class IndexedDocument:
 class VectorStore(Protocol):
     def upsert(self, doc_id: str, dense_vector: list[float], text: str, payload: dict) -> None: ...
 
-    def search(self, query_dense: list[float], query_text: str, top_k: int) -> list[SearchHit]: ...
+    def search(
+        self,
+        query_dense: list[float],
+        query_text: str,
+        top_k: int,
+        filters: dict | None = None,
+    ) -> list[SearchHit]: ...
 
 
 class InMemoryHybridVectorStore:
@@ -65,11 +99,19 @@ class InMemoryHybridVectorStore:
             if self._doc_freq[term] <= 0:
                 del self._doc_freq[term]
 
-    def search(self, query_dense: list[float], query_text: str, top_k: int) -> list[SearchHit]:
+    def search(
+        self,
+        query_dense: list[float],
+        query_text: str,
+        top_k: int,
+        filters: dict | None = None,
+    ) -> list[SearchHit]:
         query_terms = tokenize(query_text)
         hits: list[SearchHit] = []
 
         for doc in self._docs.values():
+            if not payload_matches_filters(doc.payload, filters):
+                continue
             dense_score = self._cosine(query_dense, doc.dense_vector)
             sparse_score = self._bm25_like(query_terms, doc.sparse_terms)
             combined = self._dense_weight * dense_score + self._sparse_weight * sparse_score
@@ -112,7 +154,12 @@ class QdrantHybridVectorStore:
         from qdrant_client.models import Distance, SparseVectorParams, VectorParams
 
         self._settings = settings
-        self._client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key or None)
+        # ":memory:" runs qdrant-client's embedded local mode, which exercises this
+        # backend in tests without a server. Anything else is treated as a URL.
+        if settings.qdrant_url == ":memory:":
+            self._client = QdrantClient(location=":memory:")
+        else:
+            self._client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key or None)
         self._collection = settings.qdrant_collection
 
         if not self._client.collection_exists(self._collection):
@@ -126,7 +173,7 @@ class QdrantHybridVectorStore:
         from qdrant_client.models import PointStruct, SparseVector
 
         terms = Counter(tokenize(text))
-        indices = [hash(term) % (2**31) for term in terms]
+        indices = [sparse_index(term) for term in terms]
         values = [float(count) for count in terms.values()]
 
         self._client.upsert(
@@ -140,15 +187,50 @@ class QdrantHybridVectorStore:
             ],
         )
 
-    def search(self, query_dense: list[float], query_text: str, top_k: int) -> list[SearchHit]:
+    def search(
+        self,
+        query_dense: list[float],
+        query_text: str,
+        top_k: int,
+        filters: dict | None = None,
+    ) -> list[SearchHit]:
+        """Runs dense and sparse branches server-side and fuses them with Reciprocal Rank Fusion."""
+        from qdrant_client.models import Fusion, FusionQuery, Prefetch, SparseVector
+
+        terms = Counter(tokenize(query_text))
+        query_sparse = SparseVector(
+            indices=[sparse_index(term) for term in terms],
+            values=[float(count) for count in terms.values()],
+        )
+        query_filter = self._build_filter(filters)
+
         results = self._client.query_points(
             collection_name=self._collection,
-            using="dense",
-            query=query_dense,
+            prefetch=[
+                Prefetch(query=query_dense, using="dense", limit=top_k, filter=query_filter),
+                Prefetch(query=query_sparse, using="sparse", limit=top_k, filter=query_filter),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
             limit=top_k,
             with_payload=True,
         )
         return [SearchHit(id=str(p.id), score=p.score, payload=p.payload or {}) for p in results.points]
+
+    @staticmethod
+    def _build_filter(filters: dict | None):
+        if not filters:
+            return None
+
+        from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+        conditions = []
+        for key, expected in filters.items():
+            # Qdrant matches a MatchValue against any element of an array payload field,
+            # so a list expands to one condition per required item.
+            for value in expected if isinstance(expected, list) else [expected]:
+                conditions.append(FieldCondition(key=key, match=MatchValue(value=value)))
+
+        return Filter(must=conditions)
 
 
 @lru_cache

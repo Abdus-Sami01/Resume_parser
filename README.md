@@ -98,8 +98,52 @@ two-stage matcher, and the API endpoints entirely against the fallback
 (in-process) backends, so it needs no network access, API keys, or running
 services.
 
+## Matching API
+
+`POST /search/match` takes the job profile plus optional retrieval controls:
+
+```json
+{
+  "job": { "title": "Backend Engineer", "required_skills": ["python"], "...": "..." },
+  "top_k": 50,
+  "top_n": 10,
+  "filters": { "skills": ["python"], "location": "Remote" }
+}
+```
+
+`filters` are **hard constraints** applied during stage-1 retrieval, not score
+nudges — a candidate missing a filtered skill is never retrieved, so it cannot
+be rescued by a high semantic score. Scalar values compare by equality; list
+values require every item to be present. Both backends implement identical
+semantics (in-memory predicate, Qdrant `must` conditions).
+
 ## Score breakdown
 
 `MatchResult` reports not just a single number but a weighted breakdown
 (`skills`, `experience`, `education`) plus the raw retrieval score and the
 reranker score, so the API response is explainable rather than a black box.
+
+## Notes on the search backends
+
+- **Hybrid means hybrid.** The Qdrant backend runs the dense and sparse
+  branches as separate prefetches and fuses them with Reciprocal Rank Fusion
+  server-side. Querying only the dense vector while still writing a sparse one
+  silently throws away the keyword half of the index.
+- **Sparse term indices must be process-stable.** They are derived with
+  `blake2b`, not Python's builtin `hash()`, which is randomized per interpreter
+  via `PYTHONHASHSEED` — under `hash()` a term indexed by a Celery worker lands
+  on a different index than the same term at query time, making every sparse
+  vector unmatchable across processes. `test_sparse_index_is_stable_across_interpreter_processes`
+  guards this.
+- **Set `QDRANT_URL=:memory:`** to run the Qdrant backend in qdrant-client's
+  embedded mode — no server required, which is how the production backend gets
+  real test coverage instead of only ever running in production.
+
+## Skill vocabulary
+
+Both the resume side and the job side run their skills through the same
+taxonomy before matching, since `_skills_score` is a set intersection —
+if one side emits `"React.js"` and the other `"react"`, the intersection is
+empty and the score silently collapses to zero. Skills the taxonomy does not
+recognise are kept lowercased rather than dropped, so niche skills still match
+by exact string.

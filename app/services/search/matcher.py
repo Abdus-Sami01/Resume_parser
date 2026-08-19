@@ -32,14 +32,26 @@ def index_candidate(profile: CandidateProfile, raw_text: str, candidate_id: str 
         doc_id=candidate_id,
         dense_vector=dense_vector,
         text=searchable_text,
-        payload={"candidate_id": candidate_id},
+        payload={
+            "candidate_id": candidate_id,
+            "skills": profile.skills,
+            "location": profile.location or "",
+            "total_years_experience": profile.total_years_experience,
+            "certifications": profile.certifications,
+        },
     )
     candidate_store.save(CandidateRecord(candidate_id=candidate_id, profile=profile, raw_text=raw_text))
 
     return candidate_id
 
 
-def match(job: JobProfile, top_k: int | None = None, top_n: int | None = None) -> list[MatchResult]:
+def match(
+    job: JobProfile,
+    top_k: int | None = None,
+    top_n: int | None = None,
+    filters: dict | None = None,
+) -> list[MatchResult]:
+    """Two-stage match. `filters` are hard metadata constraints applied during retrieval."""
     settings = get_settings()
     top_k = top_k or settings.retrieval_top_k
     top_n = top_n or settings.rerank_top_n
@@ -52,7 +64,9 @@ def match(job: JobProfile, top_k: int | None = None, top_n: int | None = None) -
     query_text = _job_searchable_text(job)
     query_dense = embedder.embed(query_text)
 
-    stage1_hits = vector_store.search(query_dense=query_dense, query_text=query_text, top_k=top_k)
+    stage1_hits = vector_store.search(
+        query_dense=query_dense, query_text=query_text, top_k=top_k, filters=filters
+    )
 
     results: list[MatchResult] = []
     for hit in stage1_hits:
