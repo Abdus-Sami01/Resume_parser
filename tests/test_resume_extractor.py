@@ -1,3 +1,5 @@
+import pytest
+
 from app.schemas.candidate import CandidateProfile
 from app.services.extraction.resume_extractor import (
     HeuristicResumeExtractor,
@@ -63,3 +65,47 @@ def test_standardize_profile_skills_keeps_unknown_skills_rather_than_dropping_th
 
     assert "python" in standardized.skills
     assert "obscure internal tool" in standardized.skills
+
+
+DATED_RESUME = """\
+Jane Doe
+jane.doe@example.com
+Senior Backend Engineer, Acme Corp, Jan 2019 - Dec 2022
+Backend Engineer, Beta Systems, 2015 - 2019
+Skills: Python, FastAPI, AWS
+"""
+
+
+def test_dated_roles_are_parsed_individually_rather_than_collapsed():
+    profile = HeuristicResumeExtractor().extract(DATED_RESUME)
+    assert len(profile.experience) == 2
+
+    roles = {e.role: e for e in profile.experience}
+    assert roles["Senior Backend Engineer"].company == "Acme Corp"
+    assert roles["Backend Engineer"].company == "Beta Systems"
+
+
+def test_tenures_sum_instead_of_taking_the_longest():
+    """A resume written as date ranges carries no 'N years' phrasing to max() over."""
+    profile = HeuristicResumeExtractor().extract(DATED_RESUME)
+
+    assert profile.experience[1].years == 4.0
+    assert profile.total_years_experience > 7.5
+
+
+def test_self_reported_years_still_used_when_no_dates_are_present():
+    profile = HeuristicResumeExtractor().extract("Bob\n5+ years of experience in Python.\n")
+    assert profile.total_years_experience == 5.0
+
+
+def test_open_ended_role_runs_to_today():
+    from datetime import date
+
+    profile = HeuristicResumeExtractor().extract("Ann\nStaff Engineer, Nova Labs, Mar 2021 - Present\n")
+    expected = date.today().year + (date.today().month - 1) / 12 - (2021 + 2 / 12)
+
+    assert profile.experience[0].years == pytest.approx(expected, abs=0.01)
+
+
+def test_resume_with_no_experience_signal_yields_none():
+    assert HeuristicResumeExtractor().extract("Cal\nHobbyist.\n").experience == []

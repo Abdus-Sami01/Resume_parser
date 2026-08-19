@@ -1,10 +1,14 @@
-"""Stage-2 reranking: exact contextual fit between one JD and one candidate.
+"""Stage-2 reranking: exact contextual fit between one JD and a batch of candidates.
 
-"lexical" is a dependency-free token-overlap scorer (Jaccard-ish) — a stand-in
-that keeps the two-stage pipeline shape correct offline. "cross_encoder" is
-the production backend: a real cross-encoder (bge-reranker-large or the
-Cohere Rerank API) that jointly encodes (query, document) pairs for a much
-sharper relevance score than retrieval similarity alone.
+The interface is deliberately batch-first. Cross-encoders jointly encode each
+(query, document) pair, so scoring N candidates one call at a time costs N
+sequential forward passes; handing the model the whole batch lets it fill the
+GPU in a few passes instead. A per-pair interface would push that cost onto
+every caller and get harder to undo as callers multiply.
+
+"lexical" is a dependency-free token-overlap scorer that keeps the two-stage
+pipeline shape correct offline. "cross_encoder" is the production backend
+(bge-reranker-large, or the Cohere Rerank API).
 """
 from typing import Protocol
 
@@ -13,20 +17,25 @@ from app.services.search.vector_store import tokenize
 
 
 class Reranker(Protocol):
-    def score(self, query: str, document: str) -> float: ...
+    def score_batch(self, query: str, documents: list[str]) -> list[float]: ...
 
 
 class LexicalOverlapReranker:
     """Jaccard overlap between query and document tokens, in [0, 1]."""
 
-    def score(self, query: str, document: str) -> float:
+    def score_batch(self, query: str, documents: list[str]) -> list[float]:
         query_tokens = set(tokenize(query))
-        doc_tokens = set(tokenize(document))
-        if not query_tokens or not doc_tokens:
-            return 0.0
-        intersection = query_tokens & doc_tokens
-        union = query_tokens | doc_tokens
-        return len(intersection) / len(union)
+        if not query_tokens:
+            return [0.0] * len(documents)
+
+        scores: list[float] = []
+        for document in documents:
+            doc_tokens = set(tokenize(document))
+            if not doc_tokens:
+                scores.append(0.0)
+                continue
+            scores.append(len(query_tokens & doc_tokens) / len(query_tokens | doc_tokens))
+        return scores
 
 
 class CrossEncoderReranker:
@@ -38,8 +47,11 @@ class CrossEncoderReranker:
 
         self._model = CrossEncoder(settings.reranker_model)
 
-    def score(self, query: str, document: str) -> float:
-        return float(self._model.predict([(query, document)])[0])
+    def score_batch(self, query: str, documents: list[str]) -> list[float]:
+        if not documents:
+            return []
+        pairs = [(query, document) for document in documents]
+        return [float(score) for score in self._model.predict(pairs)]
 
 
 def get_reranker() -> Reranker:

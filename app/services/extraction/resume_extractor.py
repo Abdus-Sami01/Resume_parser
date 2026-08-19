@@ -9,6 +9,7 @@ Two backends, selected by `settings.extraction_backend`:
   This is what makes the app runnable and testable fully offline.
 """
 import re
+from datetime import date
 from typing import Protocol
 
 from app.config import get_settings
@@ -31,6 +32,20 @@ _CERT_HEADER_RE = re.compile(r"^\s*certification[s]?\s*:?\s*$", re.IGNORECASE)
 _CERT_INLINE_RE = re.compile(r"^\s*certification[s]?\s*:\s*(.+)$", re.IGNORECASE)
 _CERT_PHRASE_RE = re.compile(r"\bcertified\b|\bcertificate\b", re.IGNORECASE)
 _SECTION_HEADER_RE = re.compile(r"^\s*[A-Z][A-Za-z ]{2,30}\s*:?\s*$")
+
+_MONTH_NAMES = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+_MONTH_INDEX = {name: index for index, name in enumerate(_MONTH_NAMES, start=1)}
+
+_MONTH_PATTERN = rf"(?:{'|'.join(_MONTH_NAMES)})[a-z]*"
+_DATE_POINT = rf"(?:({_MONTH_PATTERN})\.?\s+)?((?:19|20)\d{{2}})"
+_DATE_RANGE_RE = re.compile(
+    rf"{_DATE_POINT}\s*(?:-|–|—|to)\s*(?:{_DATE_POINT}|(present|current|now))",
+    re.IGNORECASE,
+)
+_COMPANY_SUFFIX_RE = re.compile(
+    r"\b(inc|corp|corporation|ltd|llc|gmbh|plc|technologies|labs|systems|solutions|group)\b\.?",
+    re.IGNORECASE,
+)
 
 
 class ResumeExtractor(Protocol):
@@ -69,12 +84,12 @@ class HeuristicResumeExtractor:
         phone_match = _PHONE_RE.search(raw_text)
 
         skills = self._standardizer.extract_and_standardize(raw_text)
-        years = self._estimate_total_years(raw_text)
-        experience = (
-            [Experience(company="Unknown", role="Unknown", years=years, achievements=[])]
-            if years
-            else []
-        )
+        experience = self._extract_experience(lines)
+        if not experience:
+            # Nothing dated to work from, so fall back to a self-reported "N years" claim.
+            years = self._estimate_total_years(raw_text)
+            if years:
+                experience = [Experience(company="Unknown", role="Unknown", years=years)]
 
         return CandidateProfile(
             name=name,
@@ -91,6 +106,66 @@ class HeuristicResumeExtractor:
     def _estimate_total_years(raw_text: str) -> float:
         matches = _YEARS_RE.findall(raw_text)
         return max((float(m) for m in matches), default=0.0)
+
+    @classmethod
+    def _extract_experience(cls, lines: list[str]) -> list[Experience]:
+        """Each line carrying a date range becomes one role, so tenures sum instead of competing.
+
+        Taking the max of every "N years" mention in a document understates anyone
+        who lists roles separately: "3 years at Acme" plus "4 years at Beta" is
+        seven years of experience, not four.
+        """
+        entries: list[Experience] = []
+
+        for line in lines:
+            match = _DATE_RANGE_RE.search(line)
+            if not match:
+                continue
+
+            years = cls._range_duration_years(match)
+            if years is None:
+                continue
+
+            role, company = cls._split_role_and_company(line[: match.start()] + line[match.end() :])
+            entries.append(Experience(company=company, role=role, years=years))
+
+        return entries
+
+    @staticmethod
+    def _range_duration_years(match: re.Match) -> float | None:
+        start_month, start_year, end_month, end_year, present = match.groups()
+
+        def to_decimal_year(month: str | None, year: str) -> float:
+            month_index = _MONTH_INDEX.get(month.lower()[:3], 1) if month else 1
+            return int(year) + (month_index - 1) / 12
+
+        start = to_decimal_year(start_month, start_year)
+        if present:
+            today = date.today()
+            end = today.year + (today.month - 1) / 12
+        elif end_year:
+            end = to_decimal_year(end_month, end_year)
+        else:
+            return None
+
+        duration = end - start
+        return round(duration, 2) if duration > 0 else None
+
+    @staticmethod
+    def _split_role_and_company(remainder: str) -> tuple[str, str]:
+        segments = [s.strip(" ,;|-–—()") for s in re.split(r"[,;|]|\s[-–—]\s", remainder)]
+        segments = [s for s in segments if s]
+        if not segments:
+            return "Unknown", "Unknown"
+
+        company_index = next(
+            (i for i, s in enumerate(segments) if _COMPANY_SUFFIX_RE.search(s)),
+            1 if len(segments) > 1 else None,
+        )
+        company = segments[company_index] if company_index is not None else "Unknown"
+        role = next((s for i, s in enumerate(segments) if i != company_index), "Unknown")
+
+        return role, company
 
     @staticmethod
     def _extract_education(lines: list[str]) -> list[Education]:

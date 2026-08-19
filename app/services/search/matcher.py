@@ -68,18 +68,25 @@ def match(
         query_dense=query_dense, query_text=query_text, top_k=top_k, filters=filters
     )
 
-    results: list[MatchResult] = []
-    for hit in stage1_hits:
-        record = candidate_store.get(hit.id)
-        if record is None:
-            continue
+    # Resolve every retrieved hit first so the reranker sees one batch rather than
+    # one forward pass per candidate.
+    retrieved = [(hit, candidate_store.get(hit.id)) for hit in stage1_hits]
+    retrieved = [(hit, record) for hit, record in retrieved if record is not None]
+    if not retrieved:
+        return []
 
-        rerank_score = reranker.score(query_text, record.raw_text)
-        breakdown = _score_breakdown(job, record.profile, retrieval_score=hit.score, rerank_score=rerank_score)
+    rerank_scores = reranker.score_batch(query_text, [record.raw_text for _, record in retrieved])
 
-        results.append(
-            MatchResult(candidate_id=record.candidate_id, candidate=record.profile, breakdown=breakdown)
+    results = [
+        MatchResult(
+            candidate_id=record.candidate_id,
+            candidate=record.profile,
+            breakdown=_score_breakdown(
+                job, record.profile, retrieval_score=hit.score, rerank_score=rerank_score
+            ),
         )
+        for (hit, record), rerank_score in zip(retrieved, rerank_scores)
+    ]
 
     results.sort(key=lambda r: r.final_score, reverse=True)
     return results[:top_n]

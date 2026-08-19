@@ -142,3 +142,44 @@ def test_payload_filter_requires_every_item_of_a_list_constraint():
     assert payload_matches_filters(payload, {"skills": ["python", "aws"]})
     assert not payload_matches_filters(payload, {"skills": ["python", "kafka"]})
     assert not payload_matches_filters({"skills": "python"}, {"skills": ["python"]})
+
+
+def test_reranker_is_called_once_for_the_whole_candidate_batch(monkeypatch):
+    """A per-pair reranker call costs one cross-encoder forward pass per candidate."""
+    from app.services.search import matcher as matcher_module
+
+    calls: list[list[str]] = []
+
+    class CountingReranker:
+        def score_batch(self, query: str, documents: list[str]) -> list[float]:
+            calls.append(documents)
+            return [0.5] * len(documents)
+
+    monkeypatch.setattr(matcher_module, "get_reranker", lambda: CountingReranker())
+
+    for i in range(3):
+        index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id=f"c{i}")
+    match(JOB)
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 3
+
+
+def test_rerank_scores_stay_aligned_with_their_candidates(monkeypatch):
+    """Guards the zip between the retrieved batch and the reranker's score list."""
+    from app.services.search import matcher as matcher_module
+
+    class PerDocumentReranker:
+        def score_batch(self, query: str, documents: list[str]) -> list[float]:
+            # Score purely off the document so the expected pairing is unambiguous.
+            return [1.0 if "photoshop" in doc.lower() else 0.0 for doc in documents]
+
+    monkeypatch.setattr(matcher_module, "get_reranker", lambda: PerDocumentReranker())
+
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+    index_candidate(WEAK_CANDIDATE, WEAK_TEXT, candidate_id="weak")
+
+    by_id = {r.candidate_id: r.breakdown.rerank_score for r in match(JOB)}
+
+    assert by_id["weak"] == 1.0
+    assert by_id["strong"] == 0.0

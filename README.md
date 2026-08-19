@@ -123,6 +123,14 @@ semantics (in-memory predicate, Qdrant `must` conditions).
 (`skills`, `experience`, `education`) plus the raw retrieval score and the
 reranker score, so the API response is explainable rather than a black box.
 
+`experience` carries the largest weight (0.5 by default), so how tenure is
+counted matters more than anything else in the rubric. The heuristic extractor
+parses each dated role separately and **sums** the tenures — reading the longest
+single "N years" mention understates anyone who lists roles individually, and
+misses resumes written purely as date ranges (`Jan 2019 - Dec 2022`), which is
+most of them. A self-reported "N years" phrase is used only as a fallback when
+there are no dates to work from.
+
 ## Notes on the search backends
 
 - **Hybrid means hybrid.** The Qdrant backend runs the dense and sparse
@@ -138,6 +146,11 @@ reranker score, so the API response is explainable rather than a black box.
 - **Set `QDRANT_URL=:memory:`** to run the Qdrant backend in qdrant-client's
   embedded mode — no server required, which is how the production backend gets
   real test coverage instead of only ever running in production.
+- **Reranking is batch-first by interface.** `Reranker.score_batch(query, documents)`
+  takes the whole candidate set, because a cross-encoder jointly encodes each
+  pair — a per-pair interface silently costs one forward pass per candidate
+  (50 sequential passes at the default `RETRIEVAL_TOP_K`) and gets harder to
+  change as callers accumulate.
 
 ## Skill vocabulary
 
