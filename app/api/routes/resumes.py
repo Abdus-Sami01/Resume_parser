@@ -8,7 +8,12 @@ from app.schemas.candidate import CandidateProfile
 from app.schemas.match import JobMatchResult
 from app.services.extraction.document_parser import get_document_parser
 from app.services.extraction.resume_extractor import get_resume_extractor
-from app.services.search.matcher import delete_candidate, index_candidate, match_jobs_for_candidate
+from app.services.search.matcher import (
+    delete_candidate,
+    find_similar_candidates,
+    index_candidate,
+    match_jobs_for_candidate,
+)
 from app.workers.tasks import get_task_state, submit_resume_parse
 
 router = APIRouter(prefix="/resumes", tags=["resumes"])
@@ -44,6 +49,12 @@ class CandidateSummary(BaseModel):
     email: str | None = None
     skills: list[str]
     total_years_experience: float
+
+
+class SimilarCandidate(BaseModel):
+    candidate_id: str
+    score: float
+    profile: CandidateProfile
 
 
 class CandidatePage(BaseModel):
@@ -170,3 +181,17 @@ async def match_jobs(
     if get_candidate_store().get(candidate_id) is None:
         raise HTTPException(status_code=404, detail="candidate not found")
     return match_jobs_for_candidate(candidate_id, top_n=top_n)
+
+
+@router.get("/{candidate_id}/similar", response_model=list[SimilarCandidate])
+async def similar_candidates(
+    candidate_id: str, top_n: int | None = Query(None, ge=1, le=100)
+) -> list[SimilarCandidate]:
+    """"More people like this one" — the usual follow-up to a good match or a good hire."""
+    if get_candidate_store().get(candidate_id) is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+
+    return [
+        SimilarCandidate(candidate_id=record.candidate_id, score=score, profile=record.profile)
+        for record, score in find_similar_candidates(candidate_id, top_n=top_n)
+    ]

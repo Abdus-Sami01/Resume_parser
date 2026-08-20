@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # Re-embeds every stored resume when the index is empty but records exist.
     reindex_on_startup: bool = True
 
+    # Skill taxonomy overlay: runtime additions land here, leaving the bundled
+    # skills.json free to be updated by a future release.
+    custom_skills_path: str = "data/custom_skills.json"
+
     # Uploads
     max_upload_bytes: int = 10 * 1024 * 1024
 

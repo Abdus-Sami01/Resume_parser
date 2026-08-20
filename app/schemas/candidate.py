@@ -1,5 +1,5 @@
 """Structured candidate profile schema — the strict target for resume extraction."""
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, computed_field
 
 
 class Education(BaseModel):
@@ -27,6 +27,7 @@ class CandidateProfile(BaseModel):
     certifications: list[str] = Field(default_factory=list)
     summary: str = ""
 
+    @computed_field  # serialized, so clients need not re-sum the experience array
     @property
     def total_years_experience(self) -> float:
-        return sum(exp.years for exp in self.experience)
+        return round(sum(exp.years for exp in self.experience), 2)

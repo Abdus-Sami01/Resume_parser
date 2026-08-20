@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.api.routes import jobs, resumes, search
+from app.api.routes import analytics, jobs, resumes, search, skills
 from app.config import get_settings
 from app.services.search.matcher import reindex_if_index_is_empty
 
@@ -30,6 +30,8 @@ app = FastAPI(
 app.include_router(resumes.router)
 app.include_router(jobs.router)
 app.include_router(search.router)
+app.include_router(analytics.router)
+app.include_router(skills.router)
 
 
 @app.get("/health")

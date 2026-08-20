@@ -40,17 +40,52 @@ def sparse_index(term: str) -> int:
     return int.from_bytes(digest, "big") % _SPARSE_INDEX_SPACE
 
 
+_RANGE_OPERATORS = {
+    "gte": lambda actual, bound: actual >= bound,
+    "gt": lambda actual, bound: actual > bound,
+    "lte": lambda actual, bound: actual <= bound,
+    "lt": lambda actual, bound: actual < bound,
+}
+
+
 def payload_matches_filters(payload: dict, filters: dict | None) -> bool:
-    """Scalar values compare by equality; list values require every item to be present."""
+    """Three filter shapes, chosen by the value's type.
+
+    - scalar -> equality            {"location": "Remote"}
+    - list   -> every item present  {"skills": ["python", "aws"]}
+    - dict   -> numeric range       {"total_years_experience": {"gte": 5}}
+
+    Ranges matter because the useful recruiter query is "5+ years", which equality
+    cannot express and which post-filtering after retrieval would get wrong — a
+    junior candidate would still consume one of the top-k slots.
+    """
     if not filters:
         return True
 
     for key, expected in filters.items():
         actual = payload.get(key)
-        if isinstance(expected, list):
+
+        if isinstance(expected, dict):
+            if not _matches_range(actual, expected):
+                return False
+        elif isinstance(expected, list):
             if not isinstance(actual, list) or any(item not in actual for item in expected):
                 return False
         elif actual != expected:
+            return False
+
+    return True
+
+
+def _matches_range(actual, bounds: dict) -> bool:
+    if not isinstance(actual, (int, float)):
+        return False
+
+    for operator, bound in bounds.items():
+        comparison = _RANGE_OPERATORS.get(operator)
+        if comparison is None:
+            raise ValueError(f"unsupported range operator {operator!r}")
+        if not comparison(actual, bound):
             return False
 
     return True
@@ -255,8 +290,13 @@ class QdrantHybridVectorStore:
 
         from qdrant_client.models import FieldCondition, Filter, MatchValue
 
+        from qdrant_client.models import Range
+
         conditions = []
         for key, expected in filters.items():
+            if isinstance(expected, dict):
+                conditions.append(FieldCondition(key=key, range=Range(**expected)))
+                continue
             # Qdrant matches a MatchValue against any element of an array payload field,
             # so a list expands to one condition per required item.
             for value in expected if isinstance(expected, list) else [expected]:

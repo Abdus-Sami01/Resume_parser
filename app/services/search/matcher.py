@@ -329,3 +329,78 @@ def reindex_if_index_is_empty() -> int:
     if not get_candidate_store().all():
         return 0
     return reindex_all()
+
+
+def search_candidates(
+    query: str = "",
+    filters: dict | None = None,
+    top_n: int | None = None,
+) -> list[tuple[CandidateRecord, float]]:
+    """Free-text + structured search over the talent pool, with no job posting involved.
+
+    The job-driven path answers "who fits this posting". This answers the other
+    half of the workflow — "who do we already have" — where a recruiter has
+    criteria in mind rather than a written role: Python, five years, remote.
+
+    With no query text the dense half has nothing to rank on, so results fall back
+    to the pool order and the structured filters do all the work.
+    """
+    settings = get_settings()
+    top_n = top_n or settings.rerank_top_n
+
+    embedder = get_embedding_client()
+    vector_store = get_vector_store()
+    candidate_store = get_candidate_store()
+
+    hits = vector_store.search(
+        query_dense=embedder.embed(query) if query else [],
+        query_text=query,
+        top_k=max(top_n, settings.retrieval_top_k),
+        filters=filters,
+    )
+
+    found: list[tuple[CandidateRecord, float]] = []
+    for hit in hits:
+        record = candidate_store.get(hit.id)
+        if record is not None:
+            found.append((record, hit.score))
+
+    return found[:top_n]
+
+
+def find_similar_candidates(
+    candidate_id: str, top_n: int | None = None
+) -> list[tuple[CandidateRecord, float]]:
+    """"More people like this one" — the standard follow-up to a good hire or a good match.
+
+    The reference candidate is excluded from its own results, which it would
+    otherwise top by a wide margin.
+    """
+    settings = get_settings()
+    top_n = top_n or settings.rerank_top_n
+
+    candidate_store = get_candidate_store()
+    reference = candidate_store.get(candidate_id)
+    if reference is None:
+        return []
+
+    embedder = get_embedding_client()
+    vector_store = get_vector_store()
+
+    reference_text = _candidate_searchable_text(reference.profile, reference.raw_text)
+    hits = vector_store.search(
+        query_dense=embedder.embed(reference_text),
+        query_text=reference_text,
+        # One extra slot, since the reference itself is expected back and dropped.
+        top_k=top_n + 1,
+    )
+
+    similar: list[tuple[CandidateRecord, float]] = []
+    for hit in hits:
+        if hit.id == candidate_id:
+            continue
+        record = candidate_store.get(hit.id)
+        if record is not None:
+            similar.append((record, hit.score))
+
+    return similar[:top_n]

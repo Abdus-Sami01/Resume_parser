@@ -1,5 +1,9 @@
 """Job posting endpoints: stateless parsing, plus a persisted catalogue."""
+import csv
+import io
+
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.db.job_store import get_job_store
@@ -93,3 +97,64 @@ async def match_stored_job(
     if record is None:
         raise HTTPException(status_code=404, detail="job not found")
     return match(record.profile, top_k=top_k, top_n=top_n)
+
+
+_EXPORT_COLUMNS = [
+    "rank",
+    "candidate_id",
+    "name",
+    "email",
+    "score",
+    "skills_score",
+    "experience_score",
+    "education_score",
+    "years_experience",
+    "required_years",
+    "matched_required_skills",
+    "missing_required_skills",
+]
+
+
+@router.get("/{job_id}/match/export")
+async def export_matches_csv(
+    job_id: str, top_n: int | None = Query(None, ge=1, le=500)
+) -> StreamingResponse:
+    """Match results as CSV, for handing a shortlist to someone who lives in a spreadsheet.
+
+    Missing required skills travel with each row: a shortlist that shows only
+    scores forces the reader back into the API to learn why anyone ranked where
+    they did.
+    """
+    record = get_job_store().get(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(_EXPORT_COLUMNS)
+
+    for rank, result in enumerate(match(record.profile, top_n=top_n), start=1):
+        writer.writerow(
+            [
+                rank,
+                result.candidate_id,
+                result.candidate.name,
+                result.candidate.email or "",
+                f"{result.breakdown.weighted_total:.4f}",
+                f"{result.breakdown.skills:.4f}",
+                f"{result.breakdown.experience:.4f}",
+                f"{result.breakdown.education:.4f}",
+                result.evidence.experience.candidate_years,
+                result.evidence.experience.required_years,
+                "; ".join(result.evidence.skills.matched_required),
+                "; ".join(result.evidence.skills.missing_required),
+            ]
+        )
+
+    buffer.seek(0)
+    filename = f"matches-{job_id}.csv"
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

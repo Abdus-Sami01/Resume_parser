@@ -14,3 +14,4 @@ qdrant_storage/
 *.db-journal
 *.db-wal
 *.db-shm
+data/custom_skills.json

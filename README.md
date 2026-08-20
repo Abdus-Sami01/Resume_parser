@@ -132,6 +132,18 @@ services.
 | Endpoint | Purpose |
 |---|---|
 | `POST /search/match` | Match an ad-hoc job profile without persisting it. |
+| `POST /search/candidates` | Search the pool directly — free text plus skills, location, and experience range. |
+| `GET /resumes/{candidate_id}/similar` | "More people like this one." |
+
+**Analytics and taxonomy**
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /analytics/overview` | Pool composition, experience bands, top skills, and skill gaps. |
+| `GET /jobs/{job_id}/match/export` | Shortlist as CSV, evidence columns included. |
+| `GET`/`POST /skills` | List the skill taxonomy, or add a skill and its aliases. |
+| `DELETE /skills/{skill}` | Remove a skill from the taxonomy. |
+| `POST /skills/standardize` | Preview how raw strings resolve — for debugging a low score. |
 
 Deletion reaches both stores deliberately. Resumes are personal data, and a
 profile erased from the record store but left in the vector index is still
@@ -171,6 +183,53 @@ nudges — a candidate missing a filtered skill is never retrieved, so it cannot
 be rescued by a high semantic score. Scalar values compare by equality; list
 values require every item to be present. Both backends implement identical
 semantics (in-memory predicate, Qdrant `must` conditions).
+
+## Searching the pool without a posting
+
+The job-driven path answers "who fits this role". `POST /search/candidates`
+answers the other half of the workflow — "who do we already have" — where the
+criteria are in a recruiter's head rather than in a written posting:
+
+```json
+{ "query": "backend python services", "skills": ["python"], "min_years_experience": 5 }
+```
+
+Experience bounds are **retrieval filters, not post-filters**. A candidate under
+the floor is never retrieved, so they cannot occupy one of the top-k slots and
+push a qualified person out of the results. The filter language has three shapes,
+chosen by value type: scalar means equality, a list means every item must be
+present, and a dict means a numeric range (`{"gte": 5}`).
+
+## Talent-pool analytics
+
+`GET /analytics/overview` reports composition — headcount, distinct skills,
+median experience, seniority bands, and the most common skills counted by
+*candidate* rather than by mention.
+
+`skill_gaps` is the actionable half. It cross-references what open postings
+require against what the pool actually holds, worst coverage first:
+
+```
+kafka        wanted by 2 job(s); 0 candidate(s) have it; coverage 0%
+kubernetes   wanted by 1 job(s); 1 candidate(s) have it; coverage 25%
+python       wanted by 1 job(s); 2 candidate(s) have it; coverage 50%
+```
+
+That names what to source for, rather than restating what you already have.
+
+## Extending the skill taxonomy
+
+The taxonomy decides whether "K8s" on a resume matches "Kubernetes" in a posting,
+so a deployment that cannot extend it silently mis-scores its own niche skills —
+internal tooling, new frameworks, regional certifications. `POST /skills` adds a
+skill or merges aliases into an existing one, and it takes effect immediately.
+
+Additions are written to an overlay file (`CUSTOM_SKILLS_PATH`), never to the
+bundled `skills.json`, so a future release can ship an updated taxonomy without
+clobbering whatever a deployment added locally.
+
+`POST /skills/standardize` previews how raw strings resolve, which is usually the
+fastest way to explain why a match scored lower than expected.
 
 ## Score breakdown and match evidence
 
