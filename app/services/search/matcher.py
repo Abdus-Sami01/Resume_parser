@@ -283,3 +283,49 @@ def match_jobs_for_candidate(
 
     results.sort(key=lambda r: r.final_score, reverse=True)
     return results[:top_n]
+
+
+def reindex_all() -> int:
+    """Rebuilds the vector index from persisted candidate records.
+
+    Durable records plus an in-process index is an inconsistent pair after a
+    restart: the candidate is listed by the API but matches nothing, which reads
+    as "no results" rather than as a broken index. Rebuilding re-embeds each
+    stored resume, so it costs one embedding call per candidate.
+    """
+    candidate_store = get_candidate_store()
+    embedder = get_embedding_client()
+    vector_store = get_vector_store()
+
+    indexed = 0
+    for record in candidate_store.all():
+        searchable_text = _candidate_searchable_text(record.profile, record.raw_text)
+        vector_store.upsert(
+            doc_id=record.candidate_id,
+            dense_vector=embedder.embed(searchable_text),
+            text=searchable_text,
+            payload={
+                "candidate_id": record.candidate_id,
+                "skills": record.profile.skills,
+                "location": record.profile.location or "",
+                "total_years_experience": record.profile.total_years_experience,
+                "certifications": record.profile.certifications,
+            },
+        )
+        indexed += 1
+
+    return indexed
+
+
+def reindex_if_index_is_empty() -> int:
+    """Rebuilds only when records exist but the index does not.
+
+    Checking the index rather than the configured backend keeps this correct for
+    every combination: Qdrant persists its own vectors, so it reports a non-zero
+    count and is left alone.
+    """
+    if get_vector_store().count() > 0:
+        return 0
+    if not get_candidate_store().all():
+        return 0
+    return reindex_all()

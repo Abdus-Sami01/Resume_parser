@@ -37,6 +37,7 @@ A production-shaped implementation of a two-pipeline resume intelligence system:
 | Reranking | Cross-encoder (pluggable, lexical fallback) | `app/services/search/reranker.py` |
 | Matching orchestration | Two-stage retrieval + weighted scoring | `app/services/search/matcher.py` |
 | Async tasks | Celery + Redis | `app/workers/` |
+| Record storage | SQLite (pluggable, in-memory fallback) | `app/db/` |
 
 Every AI/infra dependency (LLM client, embedding model, vector DB, reranker) is
 defined behind a small `Protocol` interface with a **local, dependency-free
@@ -225,10 +226,9 @@ outranks the real minimum. Either one quietly fails qualified candidates.
 
 ## Known limitations
 
-- **Stores are in-process.** Candidates and jobs live in memory, so they do not
-  survive a restart and are not shared across API workers. They sit behind small
-  classes (`CandidateStore`, `JobStore`) precisely so a Postgres implementation
-  can replace them without touching the routes.
+- **SQLite is single-writer.** `STORE_BACKEND=sqlite` is durable and fine for a
+  single API process plus workers, but it serializes writes. A high-write
+  deployment wants Postgres behind the same store interfaces.
 - **Reverse matching scans linearly.** `GET /resumes/{id}/jobs` scores every
   stored posting rather than querying a second index. A deployment holds far
   fewer open roles than resumes, so this stays cheap — but it is a scan, and it
@@ -239,6 +239,34 @@ outranks the real minimum. Either one quietly fails qualified candidates.
   left open deliberately.
 - **CJK is not word-segmented.** Tokenization keeps CJK runs intact rather than
   dropping them, but does not split them into words; that needs a segmenter.
+
+## Persistence
+
+`STORE_BACKEND` selects where candidate and job records live. `memory` (default)
+keeps everything in-process — fast, zero setup, gone on restart. `sqlite`
+persists to `SQLITE_PATH`, so records outlive the process and are visible to
+Celery workers as well as the API. Both backends are exercised by one
+parametrized contract suite in `tests/test_stores.py`, so a behavioural
+difference between them fails in CI rather than after someone flips the setting.
+
+Durable records and an in-process vector index are an inconsistent pair. After a
+restart the candidate is still listed by the API but matches nothing, which
+reads as "no results" rather than as a broken index:
+
+```
+process 1: uploaded 2 candidates, 1 job
+process 2: candidates: 2 | jobs: 1 | MATCH after restart: 0 results   <- before
+process 2: candidates: 2 | jobs: 1 | MATCH after restart: 2 results   <- after
+```
+
+So a startup hook rebuilds the index when records exist but the index is empty.
+It checks the **index**, not the configured backend, which keeps it correct for
+every combination — Qdrant persists its own vectors, reports a non-zero count,
+and is left alone. Rebuilding re-embeds each stored resume, so it costs one
+embedding call per candidate; set `REINDEX_ON_STARTUP=false` to skip it.
+
+Fully durable production setup is `STORE_BACKEND=sqlite` (records) plus
+`VECTOR_STORE_BACKEND=qdrant` (vectors), where nothing needs rebuilding at all.
 
 ## Notes on the search backends
 

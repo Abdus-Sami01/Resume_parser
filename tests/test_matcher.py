@@ -370,3 +370,53 @@ def test_updating_a_stored_job_keeps_its_creation_time():
 
     assert updated.created_at == original.created_at
     assert len(store.all()) == 1
+
+
+# --- Index rebuild --------------------------------------------------------
+
+
+def test_reindex_restores_search_after_the_index_is_lost():
+    """Durable records with an in-process index are inconsistent after a restart.
+
+    The candidate is still listed by the API but matches nothing, which reads as
+    "no results" rather than as a broken index.
+    """
+    from app.services.search.matcher import reindex_all
+    from app.services.search.vector_store import get_vector_store
+
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+
+    # Simulate a restart: records survive, the vector index does not.
+    get_vector_store().delete("strong")
+    assert match(JOB) == []
+
+    assert reindex_all() == 1
+    assert [r.candidate_id for r in match(JOB)] == ["strong"]
+
+
+def test_rebuild_is_skipped_when_the_index_is_already_populated():
+    """Qdrant persists its own vectors, so a populated index must not be re-embedded."""
+    from app.services.search.matcher import reindex_if_index_is_empty
+
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+
+    assert reindex_if_index_is_empty() == 0
+
+
+def test_rebuild_is_skipped_when_there_are_no_records():
+    from app.services.search.matcher import reindex_if_index_is_empty
+
+    assert reindex_if_index_is_empty() == 0
+
+
+def test_rebuild_runs_when_records_exist_without_an_index():
+    from app.services.search.matcher import reindex_if_index_is_empty
+    from app.services.search.vector_store import get_vector_store
+
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+    index_candidate(WEAK_CANDIDATE, WEAK_TEXT, candidate_id="weak")
+    get_vector_store().delete("strong")
+    get_vector_store().delete("weak")
+
+    assert reindex_if_index_is_empty() == 2
+    assert len(match(JOB)) == 2

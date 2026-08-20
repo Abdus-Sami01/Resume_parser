@@ -10,3 +10,7 @@ dist/
 build/
 .DS_Store
 qdrant_storage/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

@@ -344,3 +344,35 @@ def test_candidate_can_be_matched_against_stored_jobs():
 
 def test_reverse_match_for_unknown_candidate_is_a_404():
     assert client.get("/resumes/nope/jobs").status_code == 404
+
+
+def test_persisted_candidates_are_searchable_again_after_a_restart(tmp_path, monkeypatch):
+    """A candidate that survives a restart but matches nothing is worse than useless."""
+    from app.config import get_settings
+    from app.db.candidate_store import get_candidate_store
+    from app.db.job_store import get_job_store
+    from app.services.search.vector_store import get_vector_store
+
+    monkeypatch.setenv("STORE_BACKEND", "sqlite")
+    monkeypatch.setenv("SQLITE_PATH", str(tmp_path / "restart.db"))
+
+    def fresh_process() -> TestClient:
+        """Drops every in-process singleton, leaving only what is on disk."""
+        get_settings.cache_clear()
+        get_candidate_store.cache_clear()
+        get_job_store.cache_clear()
+        get_vector_store.cache_clear()
+        return TestClient(app)
+
+    with fresh_process() as first:
+        first.post("/resumes", files={"file": ("r.txt", SAMPLE_RESUME, "text/plain")})
+        job_id = first.post("/jobs", json=SAMPLE_JD).json()["job_id"]
+        assert len(first.post(f"/jobs/{job_id}/match").json()) == 1
+
+    with fresh_process() as second:
+        assert second.get("/resumes").json()["total"] == 1
+        assert second.get("/jobs").json()["total"] == 1
+        # The lifespan hook rebuilt the index, so the stored posting still matches.
+        assert len(second.post(f"/jobs/{job_id}/match").json()) == 1
+
+    get_settings.cache_clear()

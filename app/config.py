@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     weight_skills: float = 0.4
     weight_education: float = 0.1
 
+    # Record storage
+    # "memory" is in-process and lost on restart; "sqlite" persists to a file and
+    # is visible to Celery workers as well as the API.
+    store_backend: Literal["memory", "sqlite"] = "memory"
+    sqlite_path: str = "data/resume_parser.db"
+    # Re-embeds every stored resume when the index is empty but records exist.
+    reindex_on_startup: bool = True
+
     # Uploads
     max_upload_bytes: int = 10 * 1024 * 1024
 
