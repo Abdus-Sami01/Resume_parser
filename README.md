@@ -458,6 +458,47 @@ embedding call per candidate; set `REINDEX_ON_STARTUP=false` to skip it.
 Fully durable production setup is `STORE_BACKEND=sqlite` (records) plus
 `VECTOR_STORE_BACKEND=qdrant` (vectors), where nothing needs rebuilding at all.
 
+## Education and certification requirements
+
+Both were live in the schema and dead in practice: `required_education` fed a 0.1
+scoring weight that the extractor never populated, so a posting demanding a CS
+degree scored identically for someone with none, and `JobProfile` had nowhere to
+require a certification at all.
+
+The extractor now reads both out of the requirements block:
+
+```
+degree level : bachelor
+field        : computer science
+certs        : ['AWS Certified Solutions Architect']
+weights      : {experience: 0.45, skills: 0.36, education: 0.09, certifications: 0.1}
+```
+
+Two comparisons are deliberately loose:
+
+- **Degree level is ranked, not matched.** A Master's satisfies a Bachelor's
+  requirement — string equality would reject an over-qualified candidate. The
+  right level in the wrong field, or the right field at the wrong level, scores
+  partially rather than failing outright.
+- **Certifications are compared on token containment.** A posting says "AWS
+  Certified Solutions Architect" while the resume says "AWS Certified Solutions
+  Architect - Associate"; exact equality would call that a miss.
+
+The certification weight starts at **0.0** and the extractor raises it to 0.1
+(rebalancing the others proportionally) only for postings that actually name one.
+A component that is always zero never fires; one that always fires distorts every
+posting that never mentioned certifications. Explicit `weights` always win over
+this.
+
+With skills and tenure held identical, the components now separate candidates
+that were previously indistinguishable:
+
+```
+Ann Lee  total=0.6857  edu=1.00 cert=1.00   M.S. Computer Science + AWS cert
+Ben Ray  total=0.4673  edu=0.60 cert=0.00   B.A. History, no cert
+Cara Yu  total=0.4403  edu=0.00 cert=0.00   no degree, no cert
+```
+
 ## Notes on the search backends
 
 - **Tokenization is Unicode-aware.** `[a-z0-9]+` turned "José García" into

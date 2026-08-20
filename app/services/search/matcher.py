@@ -15,6 +15,7 @@ from app.db.job_store import get_job_store
 from app.schemas.candidate import CandidateProfile
 from app.schemas.job import JobProfile
 from app.schemas.match import (
+    CertificationEvidence,
     EducationEvidence,
     ExperienceEvidence,
     JobMatchResult,
@@ -25,7 +26,24 @@ from app.schemas.match import (
 )
 from app.services.search.embeddings import get_embedding_client
 from app.services.search.reranker import get_reranker
-from app.services.search.vector_store import get_vector_store
+from app.services.search.vector_store import get_vector_store, tokenize
+
+
+# Ranked so an over-qualified candidate is not rejected for exceeding the requirement.
+_DEGREE_RANK = {"associate": 1, "bachelor": 2, "master": 3, "phd": 4}
+
+
+def _candidate_degree_rank(degree: str) -> int:
+    lowered = degree.lower()
+    if any(token in lowered for token in ("phd", "ph.d", "doctor")):
+        return 4
+    if any(token in lowered for token in ("master", "m.s", "msc", "m.sc", "mba")):
+        return 3
+    if any(token in lowered for token in ("bachelor", "b.s", "bsc", "b.sc", "b.a", "ba ")):
+        return 2
+    if "associate" in lowered:
+        return 1
+    return 0
 
 
 def content_fingerprint(raw_text: str) -> str:
@@ -128,11 +146,13 @@ def _score_breakdown(
     skills_score, skills_evidence = _skills_score(job, candidate)
     experience_score, experience_evidence = _experience_score(job, candidate)
     education_score, education_evidence = _education_score(job, candidate)
+    certification_score, certification_evidence = _certifications_score(job, candidate)
 
     structured_score = (
         job.weights.skills * skills_score
         + job.weights.experience * experience_score
         + job.weights.education * education_score
+        + job.weights.certifications * certification_score
     )
     weighted_total = 0.5 * rerank_score + 0.5 * structured_score
 
@@ -140,12 +160,16 @@ def _score_breakdown(
         skills=skills_score,
         experience=experience_score,
         education=education_score,
+        certifications=certification_score,
         weighted_total=weighted_total,
         retrieval_score=retrieval_score,
         rerank_score=rerank_score,
     )
     evidence = MatchEvidence(
-        skills=skills_evidence, experience=experience_evidence, education=education_evidence
+        skills=skills_evidence,
+        experience=experience_evidence,
+        education=education_evidence,
+        certifications=certification_evidence,
     )
     return breakdown, evidence
 
@@ -195,23 +219,82 @@ def _experience_score(
 def _education_score(
     job: JobProfile, candidate: CandidateProfile
 ) -> tuple[float, EducationEvidence]:
-    if not job.required_education:
-        return 1.0, EducationEvidence(required="", matched_degree=None, meets_requirement=True)
+    """Scores the field of study and the degree level separately.
 
-    required = job.required_education.lower()
-    for education in candidate.education:
-        if required in education.degree.lower() or required in education.field_of_study.lower():
-            return 1.0, EducationEvidence(
-                required=job.required_education,
-                matched_degree=education.degree,
-                meets_requirement=True,
-            )
+    A posting asking for a Bachelor's in Computer Science is satisfied by a Master's
+    in the same field, so degree level is compared by rank rather than by equality —
+    matching the string alone would reject someone over-qualified.
+    """
+    if not job.required_education and not job.required_degree_level:
+        return 1.0, EducationEvidence(meets_requirement=True)
 
-    # A degree that does not match still beats no listed education at all.
-    partial = 0.5 if candidate.education else 0.0
-    return partial, EducationEvidence(
-        required=job.required_education, matched_degree=None, meets_requirement=False
+    evidence = EducationEvidence(
+        required=job.required_education, required_degree_level=job.required_degree_level
     )
+
+    if not candidate.education:
+        # The score and the evidence have to agree; returning 0.0 while the evidence
+        # still claims the requirement was met is worse than either alone.
+        evidence.meets_requirement = False
+        return 0.0, evidence
+
+    required_field = job.required_education.lower()
+    required_rank = _DEGREE_RANK.get(job.required_degree_level, 0)
+
+    field_matched = False
+    level_matched = required_rank == 0
+
+    for entry in candidate.education:
+        haystack = f"{entry.degree} {entry.field_of_study}".lower()
+        if required_field and required_field in haystack:
+            field_matched = True
+            evidence.matched_field = entry.field_of_study or entry.degree
+            # Name the qualification that satisfied it, not just the field.
+            evidence.matched_degree = evidence.matched_degree or entry.degree
+
+        if required_rank and _candidate_degree_rank(entry.degree) >= required_rank:
+            level_matched = True
+            evidence.matched_degree = entry.degree
+
+    if field_matched and level_matched:
+        evidence.meets_requirement = True
+        return 1.0, evidence
+
+    # A related degree at the wrong level, or the right level in another field, is
+    # still worth more than no degree at all.
+    partial = 0.6 if (field_matched or level_matched) else 0.3
+    evidence.meets_requirement = False
+    return partial, evidence
+
+
+def _certifications_score(
+    job: JobProfile, candidate: CandidateProfile
+) -> tuple[float, CertificationEvidence]:
+    """Certifications are compared loosely, since wording drifts between documents.
+
+    A posting says "AWS Certified Solutions Architect" and a resume says
+    "AWS Certified Solutions Architect - Associate"; exact equality would score
+    that as a miss.
+    """
+    required = job.required_certifications
+    if not required:
+        return 1.0, CertificationEvidence(meets_all_required=True)
+
+    held = [" ".join(tokenize(entry)) for entry in candidate.certifications]
+
+    matched: list[str] = []
+    missing: list[str] = []
+    for requirement in required:
+        needle = " ".join(tokenize(requirement))
+        if any(needle in candidate_cert or candidate_cert in needle for candidate_cert in held):
+            matched.append(requirement)
+        else:
+            missing.append(requirement)
+
+    evidence = CertificationEvidence(
+        matched=matched, missing=missing, meets_all_required=not missing
+    )
+    return round(len(matched) / len(required), 4), evidence
 
 
 def _candidate_searchable_text(profile: CandidateProfile, raw_text: str) -> str:

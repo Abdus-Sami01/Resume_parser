@@ -32,20 +32,30 @@ class ExperienceEvidence(BaseModel):
 
 class EducationEvidence(BaseModel):
     required: str = ""
+    required_degree_level: str = ""
     matched_degree: str | None = None
+    matched_field: str | None = None
     meets_requirement: bool = True
+
+
+class CertificationEvidence(BaseModel):
+    matched: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
+    meets_all_required: bool = True
 
 
 class MatchEvidence(BaseModel):
     skills: SkillEvidence
     experience: ExperienceEvidence
     education: EducationEvidence
+    certifications: CertificationEvidence = Field(default_factory=CertificationEvidence)
 
 
 class ScoreBreakdown(BaseModel):
     skills: float
     experience: float
     education: float
+    certifications: float = 1.0
     weighted_total: float
     retrieval_score: float
     rerank_score: float

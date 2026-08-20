@@ -288,6 +288,7 @@ def test_education_evidence_records_the_degree_that_satisfied_the_requirement():
 
     assert evidence.meets_requirement is True
     assert evidence.matched_degree == "B.S."
+    assert evidence.matched_field == "Computer Science"
 
 
 def test_education_evidence_flags_an_unmet_requirement():
@@ -420,3 +421,109 @@ def test_rebuild_runs_when_records_exist_without_an_index():
 
     assert reindex_if_index_is_empty() == 2
     assert len(match(JOB)) == 2
+
+
+# --- Education and certification scoring ----------------------------------
+
+
+def _graduate(degree: str, field: str) -> CandidateProfile:
+    from app.schemas.candidate import Education
+
+    return STRONG_CANDIDATE.model_copy(
+        update={"education": [Education(institution="Uni", degree=degree, field_of_study=field)]}
+    )
+
+
+CS_JOB = JOB.model_copy(
+    update={"required_education": "computer science", "required_degree_level": "bachelor"}
+)
+
+
+def test_an_exact_degree_and_field_scores_full_marks():
+    from app.services.search.matcher import _education_score
+
+    score, evidence = _education_score(CS_JOB, _graduate("B.S.", "Computer Science"))
+
+    assert score == 1.0
+    assert evidence.meets_requirement is True
+
+
+def test_a_higher_degree_satisfies_a_lower_requirement():
+    """Comparing degree strings for equality would reject someone over-qualified."""
+    from app.services.search.matcher import _education_score
+
+    score, _ = _education_score(CS_JOB, _graduate("M.S.", "Computer Science"))
+    assert score == 1.0
+
+    score, _ = _education_score(CS_JOB, _graduate("PhD", "Computer Science"))
+    assert score == 1.0
+
+
+def test_the_right_level_in_the_wrong_field_scores_partially():
+    from app.services.search.matcher import _education_score
+
+    score, evidence = _education_score(CS_JOB, _graduate("B.A.", "History"))
+
+    assert 0 < score < 1
+    assert evidence.meets_requirement is False
+    assert evidence.matched_field is None
+
+
+def test_no_education_at_all_scores_zero_and_says_so():
+    """The score and the evidence must agree — a 0.0 alongside "meets_requirement" is worse than either."""
+    from app.services.search.matcher import _education_score
+
+    score, evidence = _education_score(CS_JOB, STRONG_CANDIDATE)
+
+    assert score == 0.0
+    assert evidence.meets_requirement is False
+
+
+def test_a_job_with_no_education_requirement_scores_everyone_equally():
+    from app.services.search.matcher import _education_score
+
+    assert _education_score(JOB, STRONG_CANDIDATE)[0] == 1.0
+    assert _education_score(JOB, _graduate("PhD", "Computer Science"))[0] == 1.0
+
+
+def test_certifications_match_despite_differing_wording():
+    """A posting says "...Solutions Architect"; a resume says "...Solutions Architect - Associate"."""
+    from app.services.search.matcher import _certifications_score
+
+    job = JOB.model_copy(update={"required_certifications": ["AWS Certified Solutions Architect"]})
+    holder = STRONG_CANDIDATE.model_copy(
+        update={"certifications": ["AWS Certified Solutions Architect - Associate"]}
+    )
+
+    score, evidence = _certifications_score(job, holder)
+
+    assert score == 1.0
+    assert evidence.meets_all_required is True
+    assert evidence.missing == []
+
+
+def test_missing_certifications_are_named():
+    from app.services.search.matcher import _certifications_score
+
+    job = JOB.model_copy(update={"required_certifications": ["AWS Certified Solutions Architect"]})
+
+    score, evidence = _certifications_score(job, STRONG_CANDIDATE)
+
+    assert score == 0.0
+    assert evidence.missing == ["AWS Certified Solutions Architect"]
+    assert evidence.meets_all_required is False
+
+
+def test_partial_certification_coverage_scores_proportionally():
+    from app.services.search.matcher import _certifications_score
+
+    job = JOB.model_copy(update={"required_certifications": ["AWS Certified", "CISSP Certified"]})
+    holder = STRONG_CANDIDATE.model_copy(update={"certifications": ["AWS Certified"]})
+
+    assert _certifications_score(job, holder)[0] == 0.5
+
+
+def test_a_job_requiring_no_certifications_scores_everyone_equally():
+    from app.services.search.matcher import _certifications_score
+
+    assert _certifications_score(JOB, STRONG_CANDIDATE)[0] == 1.0

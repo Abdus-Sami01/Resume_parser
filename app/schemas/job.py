@@ -6,10 +6,13 @@ class JobWeights(BaseModel):
     experience: float = 0.5
     skills: float = 0.4
     education: float = 0.1
+    # Defaults to zero so every existing weighting still sums to 1.0. The extractor
+    # raises it only for postings that actually name a required certification.
+    certifications: float = 0.0
 
     @model_validator(mode="after")
     def _sum_to_one(self) -> "JobWeights":
-        total = self.experience + self.skills + self.education
+        total = self.experience + self.skills + self.education + self.certifications
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"job weights must sum to 1.0, got {total}")
         return self
@@ -23,7 +26,11 @@ class JobProfile(BaseModel):
     required_skills: list[str] = Field(default_factory=list)
     preferred_skills: list[str] = Field(default_factory=list)
     min_years_experience: float = 0
-    required_education: str = ""
+    required_education: str = Field(
+        "", description="Field of study or degree level the posting requires"
+    )
+    required_degree_level: str = Field("", description="e.g. bachelor, master, phd")
+    required_certifications: list[str] = Field(default_factory=list)
     description: str = ""
     weights: JobWeights = Field(default_factory=JobWeights)
 
