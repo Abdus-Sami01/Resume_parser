@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # skills.json free to be updated by a future release.
     custom_skills_path: str = "data/custom_skills.json"
 
+    # Security. Comma-separated API keys; empty disables auth (development only).
+    api_keys: str = ""
+
     # Uploads
     max_upload_bytes: int = 10 * 1024 * 1024
 

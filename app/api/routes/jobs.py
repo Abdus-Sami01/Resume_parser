@@ -10,6 +10,7 @@ from app.db.job_store import get_job_store
 from app.schemas.job import JobProfile, JobWeights
 from app.schemas.match import MatchResult
 from app.services.extraction.job_extractor import get_job_extractor
+from app.services.privacy import pseudonym_for, redact_profile
 from app.services.search.matcher import match
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -91,12 +92,23 @@ async def match_stored_job(
     job_id: str,
     top_k: int | None = Query(None, ge=1, le=1000),
     top_n: int | None = Query(None, ge=1, le=100),
+    blind: bool = Query(False, description="Redact identifying fields for bias-reduced review"),
 ) -> list[MatchResult]:
     """Re-runs a saved posting against the current candidate pool."""
     record = get_job_store().get(job_id)
     if record is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return match(record.profile, top_k=top_k, top_n=top_n)
+
+    results = match(record.profile, top_k=top_k, top_n=top_n)
+    if not blind:
+        return results
+
+    return [
+        result.model_copy(
+            update={"candidate": redact_profile(result.candidate, result.candidate_id)}
+        )
+        for result in results
+    ]
 
 
 _EXPORT_COLUMNS = [
@@ -117,7 +129,9 @@ _EXPORT_COLUMNS = [
 
 @router.get("/{job_id}/match/export")
 async def export_matches_csv(
-    job_id: str, top_n: int | None = Query(None, ge=1, le=500)
+    job_id: str,
+    top_n: int | None = Query(None, ge=1, le=500),
+    blind: bool = Query(False, description="Redact identifying columns"),
 ) -> StreamingResponse:
     """Match results as CSV, for handing a shortlist to someone who lives in a spreadsheet.
 
@@ -138,8 +152,8 @@ async def export_matches_csv(
             [
                 rank,
                 result.candidate_id,
-                result.candidate.name,
-                result.candidate.email or "",
+                pseudonym_for(result.candidate_id) if blind else result.candidate.name,
+                "" if blind else (result.candidate.email or ""),
                 f"{result.breakdown.weighted_total:.4f}",
                 f"{result.breakdown.skills:.4f}",
                 f"{result.breakdown.experience:.4f}",

@@ -38,6 +38,8 @@ A production-shaped implementation of a two-pipeline resume intelligence system:
 | Matching orchestration | Two-stage retrieval + weighted scoring | `app/services/search/matcher.py` |
 | Async tasks | Celery + Redis | `app/workers/` |
 | Record storage | SQLite (pluggable, in-memory fallback) | `app/db/` |
+| Authentication | API key header | `app/api/security.py` |
+| Blind screening | Field redaction | `app/services/privacy.py` |
 
 Every AI/infra dependency (LLM client, embedding model, vector DB, reranker) is
 defined behind a small `Protocol` interface with a **local, dependency-free
@@ -101,6 +103,57 @@ The test suite exercises schema validation, skill standardization, the
 two-stage matcher, and the API endpoints entirely against the fallback
 (in-process) backends, so it needs no network access, API keys, or running
 services.
+
+## Authentication
+
+The service stores resumes — personal data — so an open deployment exposes names,
+emails, and phone numbers to anyone who can reach the port.
+
+Set `API_KEYS` to a comma-separated list and every endpoint requires a matching
+`X-API-Key` header. `/health` stays open, because load balancers and container
+probes cannot present a key.
+
+```bash
+export API_KEYS=key-one,key-two
+curl -H "X-API-Key: key-one" localhost:8000/resumes
+```
+
+With `API_KEYS` empty, auth is **off** and everything is reachable. That keeps
+the zero-config local run working, and it is a development default rather than a
+safe production one — so startup logs a warning whenever it applies, instead of
+letting an open deployment pass silently. Keys are compared with
+`hmac.compare_digest`, so a caller cannot probe one character at a time, and the
+dependency is attached per-router rather than per-endpoint so a route added later
+cannot quietly skip it.
+
+## Blind screening
+
+`?blind=true` on the match endpoints (and `blind: true` on `POST /search/match`)
+redacts name, email, phone, free-text summary, and institution names:
+
+```
+normal: name='Jane Doe'            email='jane.doe@example.com'  school='Stanford University'
+blind : name='Candidate 22230152'  email=None                    school=''
+        skills=['python','postgresql','aws','fastapi']  years=7.92  degree='B.S. in Computer Science'
+```
+
+Skills, tenure, and the degree itself stay — everything the decision actually
+rests on. The summary goes because free text routinely reintroduces a name or
+pronoun that the structured fields just removed, and institution goes because
+prestige skews a first pass.
+
+**Ranking is identical either way.** Scoring never reads the redacted fields, so
+a blind shortlist is the same shortlist in the same order; the only difference is
+what the reviewer sees. A test asserts this rather than leaving it to trust, and
+another asserts the stored record is never mutated by redaction.
+
+## Observability
+
+Every response carries `X-Process-Time-Ms` and every request is logged with
+method, path, status, and duration. Latency here is dominated by model calls that
+are invisible from outside — an embedding round trip, a cross-encoder pass over
+fifty candidates — so without this a caller cannot distinguish a slow model from
+a slow network.
 
 ## API surface
 

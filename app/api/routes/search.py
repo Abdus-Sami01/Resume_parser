@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from app.schemas.candidate import CandidateProfile
 from app.schemas.job import JobProfile
 from app.schemas.match import MatchResult
+from app.services.privacy import redact_profile
 from app.services.search.matcher import match, search_candidates
 
 router = APIRouter(prefix="/search", tags=["search"])
@@ -17,6 +18,10 @@ class MatchRequest(BaseModel):
     filters: dict = Field(
         default_factory=dict,
         description='Hard metadata constraints, e.g. {"skills": ["python"], "location": "Remote"}',
+    )
+    blind: bool = Field(
+        default=False,
+        description="Redact identifying fields for bias-reduced first-pass review",
     )
 
 
@@ -59,7 +64,17 @@ class CandidateSearchHit(BaseModel):
 
 @router.post("/match", response_model=list[MatchResult])
 async def match_candidates(request: MatchRequest) -> list[MatchResult]:
-    return match(request.job, top_k=request.top_k, top_n=request.top_n, filters=request.filters or None)
+    results = match(
+        request.job, top_k=request.top_k, top_n=request.top_n, filters=request.filters or None
+    )
+    return [_apply_blind(result) for result in results] if request.blind else results
+
+
+def _apply_blind(result: MatchResult) -> MatchResult:
+    """Redacts the profile only. Ranking is untouched — scoring never read these fields."""
+    return result.model_copy(
+        update={"candidate": redact_profile(result.candidate, result.candidate_id)}
+    )
 
 
 @router.post("/candidates", response_model=list[CandidateSearchHit])
