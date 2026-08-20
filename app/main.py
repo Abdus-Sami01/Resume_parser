@@ -3,10 +3,12 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 
-from app.api.routes import analytics, jobs, resumes, search, skills
+from app.api.routes import analytics, jobs, pipeline, resumes, search, skills
 from app.api.security import require_api_key, warn_if_unauthenticated
 from app.config import get_settings
+from app.services.rate_limit import caller_identity, get_rate_limiter
 from app.services.search.matcher import reindex_if_index_is_empty
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,42 @@ app = FastAPI(
     version="0.3.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def enforce_rate_limit(request: Request, call_next):
+    """Throttles per caller before any work is done.
+
+    Parsing an upload runs a document pipeline and, in production, an LLM call, so
+    the request has to be rejected *before* that cost is incurred rather than
+    after. /health is exempt so throttling can never take a service out of its
+    load balancer.
+    """
+    if request.url.path == "/health":
+        return await call_next(request)
+
+    identity = caller_identity(
+        request.headers.get("X-API-Key"), request.client.host if request.client else None
+    )
+    decision = get_rate_limiter().check(identity)
+
+    if not decision.allowed:
+        logger.warning("rate limit exceeded for %s on %s", identity, request.url.path)
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "rate limit exceeded"},
+            headers={
+                "Retry-After": str(decision.retry_after_seconds),
+                "X-RateLimit-Limit": str(decision.limit),
+                "X-RateLimit-Remaining": "0",
+            },
+        )
+
+    response = await call_next(request)
+    if decision.limit:
+        response.headers["X-RateLimit-Limit"] = str(decision.limit)
+        response.headers["X-RateLimit-Remaining"] = str(decision.remaining)
+    return response
 
 
 @app.middleware("http")
@@ -65,6 +103,7 @@ app.include_router(jobs.router, dependencies=_protected)
 app.include_router(search.router, dependencies=_protected)
 app.include_router(analytics.router, dependencies=_protected)
 app.include_router(skills.router, dependencies=_protected)
+app.include_router(pipeline.router, dependencies=_protected)
 
 
 @app.get("/health")

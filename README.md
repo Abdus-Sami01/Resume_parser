@@ -40,6 +40,8 @@ A production-shaped implementation of a two-pipeline resume intelligence system:
 | Record storage | SQLite (pluggable, in-memory fallback) | `app/db/` |
 | Authentication | API key header | `app/api/security.py` |
 | Blind screening | Field redaction | `app/services/privacy.py` |
+| Rate limiting | Sliding window (memory or Redis) | `app/services/rate_limit.py` |
+| Hiring pipeline | Stage tracking + audit trail | `app/services/pipeline.py`, `app/db/pipeline_store.py` |
 
 Every AI/infra dependency (LLM client, embedding model, vector DB, reranker) is
 defined behind a small `Protocol` interface with a **local, dependency-free
@@ -188,6 +190,17 @@ a slow network.
 | `POST /search/candidates` | Search the pool directly — free text plus skills, location, and experience range. |
 | `GET /resumes/{candidate_id}/similar` | "More people like this one." |
 
+**Hiring pipeline**
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /jobs/{job_id}/pipeline` | Add a candidate to a role's pipeline. |
+| `GET /jobs/{job_id}/pipeline` | The board, with per-stage counts. Supports `?stage=` and `?blind=true`. |
+| `PATCH /jobs/{job_id}/pipeline/{candidate_id}` | Move a stage, appending to the audit trail. |
+| `DELETE /jobs/{job_id}/pipeline/{candidate_id}` | Remove from the pipeline. |
+| `GET /jobs/{job_id}/pipeline/funnel` | Stage counts and conversion between steps. |
+| `GET /resumes/{candidate_id}/applications` | Every role this candidate is in play for. |
+
 **Analytics and taxonomy**
 
 | Endpoint | Purpose |
@@ -283,6 +296,71 @@ clobbering whatever a deployment added locally.
 
 `POST /skills/standardize` previews how raw strings resolve, which is usually the
 fastest way to explain why a match scored lower than expected.
+
+## Hiring pipeline
+
+Stage belongs to a **(candidate, job) pair**, not to a candidate. The same person
+can be at `offer` for one role and `rejected` for another, and a single global
+status could not express that — `GET /resumes/{id}/applications` returns all of
+them.
+
+Stages are `applied → screening → interview → offer → hired`, plus `rejected` and
+`withdrawn` as exits. Transitions are deliberately **not** constrained by a state
+machine: real processes send people back a stage, revive a rejection, or skip a
+step, and a rigid graph only teaches users to work around it. What makes that safe
+is the audit trail — every move records the previous stage, the new one, who made
+it, and why:
+
+```
+None    -> applied    by recruiter@co  ''
+applied -> screening  by hm@co         'strong python'
+screening -> interview by hm@co        'panel booked'
+```
+
+Moving to the stage someone is already in is a no-op, so a mis-click never lands
+in the history as a decision that was made.
+
+### Funnel
+
+`GET /jobs/{id}/pipeline/funnel` counts stages **ever reached**, not just current
+ones. Counting current stages would report a funnel that never converts — someone
+now at `offer` has already passed through screening and interview, so counting
+only where they stand now shows those steps as empty:
+
+```
+applied    here=0  ever_reached=3  conv=  -
+screening  here=1  ever_reached=2  conv=67%
+interview  here=0  ever_reached=1  conv=50%
+offer      here=1  ever_reached=1  conv=100%
+```
+
+Erasing a candidate clears their pipeline entries too. Stage notes carry the
+candidate id alongside free text a reviewer wrote about them, so leaving those
+behind would defeat the erasure.
+
+## Rate limiting
+
+`RATE_LIMIT_PER_MINUTE` throttles per caller — by API key when one is present, by
+client IP otherwise. Keying on IP alone would put an entire corporate NAT into a
+single bucket; keying on the API key gives each tenant its own quota.
+
+```
+req 1: 200  X-RateLimit-Remaining=2
+req 3: 200  X-RateLimit-Remaining=0
+req 4: 429  Retry-After=60
+```
+
+The check runs **before** any work: parsing an upload runs a document pipeline and,
+in production, an LLM call, so the request has to be rejected before that cost is
+incurred rather than after. `/health` is exempt, because throttling a health check
+would take the service out of its own load balancer.
+
+`RATE_LIMIT_BACKEND=memory` (default) is a per-process sliding window — correct
+for one worker and **honestly wrong for several**, since four uvicorn workers each
+admit the full quota and the effective limit is four times what was configured.
+Use `redis` whenever more than one process serves traffic; it shares one window
+across every worker and machine. It is a true sliding window rather than a fixed
+bucket, so a caller cannot send a full quota at 0:59 and another at 1:00.
 
 ## Score breakdown and match evidence
 

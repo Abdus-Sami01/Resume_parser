@@ -83,8 +83,12 @@ async def replace_job(job_id: str, request: JobParseRequest) -> StoredJob:
 
 @router.delete("/{job_id}", status_code=204)
 async def delete_job(job_id: str) -> None:
+    """Removes the posting and its pipeline, which is meaningless without it."""
+    from app.db.pipeline_store import get_pipeline_store
+
     if not get_job_store().delete(job_id):
         raise HTTPException(status_code=404, detail="job not found")
+    get_pipeline_store().delete_for_job(job_id)
 
 
 @router.post("/{job_id}/match", response_model=list[MatchResult])

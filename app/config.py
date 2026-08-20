@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # Security. Comma-separated API keys; empty disables auth (development only).
     api_keys: str = ""
 
+    # Rate limiting. 0 disables it. "memory" is per-process and undercounts across
+    # workers; "redis" shares one window cluster-wide.
+    rate_limit_per_minute: int = 0
+    rate_limit_backend: Literal["memory", "redis"] = "memory"
+
     # Uploads
     max_upload_bytes: int = 10 * 1024 * 1024
 

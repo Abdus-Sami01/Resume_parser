@@ -227,14 +227,19 @@ def _job_searchable_text(job: JobProfile) -> str:
 def delete_candidate(candidate_id: str) -> bool:
     """Removes a candidate from both the profile store and the index.
 
-    Resumes are personal data, so erasure has to reach the vector index too —
-    a profile deleted from one store and left in the other is still discoverable.
+    Resumes are personal data, so erasure has to reach the vector index and the
+    pipeline history too — a profile deleted from one store and left in another is
+    still discoverable, and stage notes carry the candidate id alongside free text
+    a reviewer wrote about them.
     """
+    from app.db.pipeline_store import get_pipeline_store
+
     candidate_store = get_candidate_store()
     vector_store = get_vector_store()
 
     existed = candidate_store.delete(candidate_id)
     vector_store.delete(candidate_id)
+    get_pipeline_store().delete_for_candidate(candidate_id)
     return existed
 
 
