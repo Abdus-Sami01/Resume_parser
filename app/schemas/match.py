@@ -18,6 +18,10 @@ class SkillEvidence(BaseModel):
     extra: list[str] = Field(
         default_factory=list, description="Candidate skills the posting never asked for"
     )
+    stale: list[str] = Field(
+        default_factory=list,
+        description="Required skills last evidenced long enough ago to be discounted",
+    )
 
     @property
     def meets_all_required(self) -> bool:

@@ -467,6 +467,11 @@ Designer         score=0.36  total=6.0y  relevant=1.8y  meets=False
 Career Changer   score=0.5   total=6.0y  relevant=2.5y  meets=False
 ```
 
+Bullets under each role are captured as `achievements`, which is what makes this
+work on a real resume: the title says "Engineer", the bullets say which language,
+which database, at what scale. Discarding them throws away the only text tying a
+skill to a period of someone's career.
+
 Relevance is read from the role title and its achievements against the job title
 and required skills, so a "Platform Engineer" whose achievements name Python is
 credited in full — the title sharing no words with the posting does not make the
@@ -687,6 +692,26 @@ the actionable half — a stage nobody leaves for nine days is a scheduling prob
 not a candidate-quality one. Only completed spans are averaged: someone still
 sitting in a stage has no duration yet, and counting the open span would drag
 every average toward zero.
+
+## Skill recency
+
+A flat skills list carries no dates, so a skill is placed in time by finding the
+role whose text evidences using it:
+
+```
+uses them now                  skills_score=1.0   stale=[]
+last used 2014                 skills_score=0.52  stale=['kafka', 'python']
+listed only, no role evidence  skills_score=1.0   stale=[]
+```
+
+Somebody who has been a product manager since 2019 lists Kafka truthfully and is
+still not a current Kafka engineer. The skill stays **matched** — it is not
+missing — but counts less, and `stale` names it so the discount is visible.
+
+The third row is the important one. Most resumes list skills in a section and
+never mention them again, so "no evidence" has to mean **no discount** rather than
+"assume it is old". Same principle as the unreadable role title and the missing
+end date: a gap in our parsing must never become the candidate's penalty.
 
 ## The reranker blend
 

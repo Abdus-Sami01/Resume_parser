@@ -722,3 +722,70 @@ def test_matching_a_closed_role_directly_still_works():
     closed = JOB.model_copy(update={"status": JobStatus.CLOSED})
 
     assert len(match(closed)) == 1
+
+
+# --- Skill recency ---------------------------------------------------------
+
+
+SKILL_JOB = JobProfile(title="Backend Engineer", required_skills=["python", "kafka"])
+
+
+def _parsed(text: str) -> CandidateProfile:
+    from app.services.extraction.resume_extractor import HeuristicResumeExtractor
+
+    return HeuristicResumeExtractor().extract(text)
+
+
+def test_currently_used_skills_score_in_full():
+    from app.services.search.matcher import _skills_score
+
+    profile = _parsed(
+        "Ann\nSenior Backend Engineer, Acme, Jan 2020 - Present\n"
+        "- Built Python microservices and Kafka consumers\n"
+        "Skills: Python, Kafka\n"
+    )
+    score, evidence = _skills_score(SKILL_JOB, profile)
+
+    assert score == 1.0
+    assert evidence.stale == []
+
+
+def test_skills_last_evidenced_a_decade_ago_are_discounted():
+    """Someone who has been a PM since 2019 is not a current Kafka engineer."""
+    from app.services.search.matcher import _skills_score
+
+    profile = _parsed(
+        "Bo\nProduct Manager, Acme, Jan 2019 - Present\n"
+        "- Owned the roadmap\n"
+        "Data Engineer, Beta, Jan 2010 - Dec 2014\n"
+        "- Built Python services and Kafka consumers\n"
+        "Skills: Python, Kafka\n"
+    )
+    score, evidence = _skills_score(SKILL_JOB, profile)
+
+    assert score < 0.7
+    assert set(evidence.matched_required) == {"python", "kafka"}  # still matched
+    assert set(evidence.stale) == {"python", "kafka"}  # but dated
+
+
+def test_a_skill_with_no_role_evidence_is_not_discounted():
+    """Most resumes list skills in their own section and never mention them again."""
+    from app.services.search.matcher import _skills_score
+
+    profile = _parsed(
+        "Cy\nEngineer, Nova, Jan 2020 - Present\n- Did engineering things\nSkills: Python, Kafka\n"
+    )
+    score, evidence = _skills_score(SKILL_JOB, profile)
+
+    assert score == 1.0
+    assert evidence.stale == []
+
+
+def test_a_missing_skill_is_still_reported_as_missing_not_stale():
+    from app.services.search.matcher import _skills_score
+
+    profile = _parsed("Dee\nEngineer, Nova, Jan 2020 - Present\nSkills: Python\n")
+    _, evidence = _skills_score(SKILL_JOB, profile)
+
+    assert evidence.missing_required == ["kafka"]
+    assert "kafka" not in evidence.stale

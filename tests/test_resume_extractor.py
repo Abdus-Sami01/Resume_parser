@@ -173,3 +173,63 @@ def test_an_open_ended_role_is_marked_current():
     )
 
     assert profile.experience[0].is_current is True
+
+
+BULLETED_RESUME = """\
+Ann Lee
+ann@x.com
+
+Senior Backend Engineer, Acme Corp, Jan 2020 - Present
+- Built Python microservices handling 2M requests/day
+- Migrated the billing system to PostgreSQL
+
+Data Engineer, Beta Systems, Jan 2014 - Dec 2018
+- Maintained Hadoop clusters
+- Wrote Kafka consumers in Scala
+
+Skills: Python, PostgreSQL, Kafka
+Education: B.S. in Computer Science, Stanford University, 2013
+"""
+
+
+def test_bullets_under_a_role_are_captured():
+    """The title says "Engineer"; the bullets say which language and which database."""
+    roles = {e.role: e for e in HeuristicResumeExtractor().extract(BULLETED_RESUME).experience}
+
+    assert roles["Senior Backend Engineer"].achievements == [
+        "Built Python microservices handling 2M requests/day",
+        "Migrated the billing system to PostgreSQL",
+    ]
+
+
+def test_bullets_are_attached_to_the_right_role():
+    roles = {e.role: e for e in HeuristicResumeExtractor().extract(BULLETED_RESUME).experience}
+
+    assert any("Kafka" in a for a in roles["Data Engineer"].achievements)
+    assert not any("Kafka" in a for a in roles["Senior Backend Engineer"].achievements)
+
+
+def test_a_following_section_does_not_get_swallowed_as_a_bullet():
+    """"Skills:" and "Education:" carry content, so a bare-header check misses them."""
+    profile = HeuristicResumeExtractor().extract(BULLETED_RESUME)
+
+    for entry in profile.experience:
+        assert not any(a.startswith("Skills") or a.startswith("Education") for a in entry.achievements)
+    assert profile.education  # the education line was still parsed as education
+
+
+def test_wrapped_bullets_are_joined():
+    profile = HeuristicResumeExtractor().extract(
+        "Ann\nEngineer, Acme, Jan 2020 - Present\n"
+        "- Built a service that processed\n"
+        "  several million events per day\n"
+    )
+
+    assert profile.experience[0].achievements == [
+        "Built a service that processed several million events per day"
+    ]
+
+
+def test_a_role_without_bullets_yields_no_achievements():
+    profile = HeuristicResumeExtractor().extract("Ann\nEngineer, Acme, Jan 2020 - Present\n")
+    assert profile.experience[0].achievements == []

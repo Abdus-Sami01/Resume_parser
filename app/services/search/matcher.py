@@ -180,6 +180,29 @@ def _score_breakdown(
     return breakdown, evidence
 
 
+def _skill_last_used(candidate: CandidateProfile, skill: str, now: float) -> float | None:
+    """Newest role whose text evidences this skill, or None when nothing does.
+
+    A flat skills list carries no dates, so the only way to place a skill in time
+    is to find the role that describes using it. Most resumes list skills in their
+    own section and never mention them again, which is why "no evidence" has to
+    mean "no discount" rather than "assume it is old".
+    """
+    needle = set(tokenize(skill))
+    if not needle:
+        return None
+
+    last_used: float | None = None
+    for entry in candidate.experience:
+        context = set(tokenize(f"{entry.role} {' '.join(entry.achievements)}"))
+        if not needle <= context:
+            continue
+        ended = now if (entry.is_current or entry.end_year is None) else entry.end_year
+        last_used = max(last_used or ended, ended)
+
+    return last_used
+
+
 def _skills_score(job: JobProfile, candidate: CandidateProfile) -> tuple[float, SkillEvidence]:
     candidate_skills = set(candidate.skills)
     required = set(job.required_skills)
@@ -196,7 +219,28 @@ def _skills_score(job: JobProfile, candidate: CandidateProfile) -> tuple[float, 
     if not required and not preferred:
         return 1.0, evidence
 
-    required_hit = len(evidence.matched_required) / len(required) if required else 1.0
+    now = _current_decimal_year()
+
+    # A matched skill counts less when the only role evidencing it ended long ago.
+    credited = 0.0
+    for skill in evidence.matched_required:
+        last_used = _skill_last_used(candidate, skill, now)
+        if last_used is None:
+            credited += 1.0
+            continue
+
+        years_ago = max(now - last_used, 0.0)
+        factor = 1.0
+        if years_ago > _RECENCY_GRACE_YEARS:
+            factor = max(
+                0.5 ** ((years_ago - _RECENCY_GRACE_YEARS) / _RECENCY_HALF_LIFE_YEARS),
+                _RECENCY_FLOOR,
+            )
+            if years_ago > _STALE_AFTER_YEARS:
+                evidence.stale.append(skill)
+        credited += factor
+
+    required_hit = credited / len(required) if required else 1.0
     preferred_hit = len(evidence.matched_preferred) / len(preferred) if preferred else 1.0
 
     # Required coverage dominates; preferred skills nudge the score up.

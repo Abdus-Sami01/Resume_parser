@@ -32,6 +32,10 @@ _CERT_HEADER_RE = re.compile(r"^\s*certification[s]?\s*:?\s*$", re.IGNORECASE)
 _CERT_INLINE_RE = re.compile(r"^\s*certification[s]?\s*:\s*(.+)$", re.IGNORECASE)
 _CERT_PHRASE_RE = re.compile(r"\bcertified\b|\bcertificate\b", re.IGNORECASE)
 _SECTION_HEADER_RE = re.compile(r"^\s*[A-Z][A-Za-z ]{2,30}\s*:?\s*$")
+_BULLET_RE = re.compile(r"^\s*[-•*\u2022\u25cf\u00b7]\s*")
+# "Skills:", "Education:" and friends end a role's bullet list even when they
+# carry content on the same line, which a bare section header does not.
+_LABELLED_SECTION_RE = re.compile(r"^\s*[A-Z][A-Za-z ]{2,24}:\s*\S")
 # A table-laid-out docx puts its label column inline ("Experience: Senior Engineer").
 _LEADING_LABEL_RE = re.compile(r"^\s*[A-Za-z][A-Za-z ]{0,20}:\s*")
 
@@ -119,7 +123,7 @@ class HeuristicResumeExtractor:
         """
         entries: list[Experience] = []
 
-        for line in lines:
+        for index, line in enumerate(lines):
             match = _DATE_RANGE_RE.search(line)
             if not match:
                 continue
@@ -138,10 +142,39 @@ class HeuristicResumeExtractor:
                     start_year=round(start, 2),
                     end_year=round(end, 2),
                     is_current=is_current,
+                    achievements=cls._collect_achievements(lines, index + 1),
                 )
             )
 
         return entries
+
+    @staticmethod
+    def _collect_achievements(lines: list[str], start_index: int) -> list[str]:
+        """Takes the bullets under a role until the next role or section begins.
+
+        The bullets are where the work is actually described — the role title says
+        "Engineer", the bullets say which language, which database, which scale.
+        Discarding them throws away the only text that ties a skill to a period of
+        someone's career.
+        """
+        collected: list[str] = []
+
+        for line in lines[start_index:]:
+            if _DATE_RANGE_RE.search(line):
+                break  # the next role
+            if _SECTION_HEADER_RE.match(line) or _LABELLED_SECTION_RE.match(line):
+                break  # "Skills:", "Education", and friends
+
+            bullet = _BULLET_RE.match(line)
+            if bullet:
+                collected.append(line[bullet.end() :].strip())
+            elif collected:
+                # A wrapped continuation of the previous bullet.
+                collected[-1] = f"{collected[-1]} {line.strip()}"
+            else:
+                break
+
+        return [item for item in collected if item]
 
     @staticmethod
     def _range_span(match: re.Match) -> tuple[float, float, bool] | None:
