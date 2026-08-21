@@ -203,23 +203,72 @@ def _skills_score(job: JobProfile, candidate: CandidateProfile) -> tuple[float, 
     return round(0.8 * required_hit + 0.2 * preferred_hit, 4), evidence
 
 
+# Unrelated work is not worthless — a decade in any professional role carries
+# transferable judgement — but it is not what "5+ years experience" on a backend
+# posting is asking for. The floor keeps it counting for something.
+_UNRELATED_EXPERIENCE_FLOOR = 0.3
+_RELEVANCE_THRESHOLD = 0.5
+
+
+def _role_relevance(job: JobProfile, entry) -> float:
+    """How much a single role counts toward a posting's experience requirement.
+
+    Relevance is read from the role title and its achievements, against the job
+    title and the required skills. When the parser could not recover a role at
+    all, relevance is 1.0: penalising a candidate for a gap in *our* extraction
+    would quietly punish whoever submitted a resume we parsed badly.
+    """
+    role_tokens = set(tokenize(entry.role))
+    if not role_tokens or entry.role.strip().lower() in {"unknown", ""}:
+        return 1.0
+
+    title_tokens = set(tokenize(job.title))
+    overlap = len(role_tokens & title_tokens) / len(title_tokens) if title_tokens else 0.0
+
+    # A role whose achievements name the required skills is relevant even when the
+    # title shares no words — "Platform Engineer" doing Python is still Python work.
+    context = role_tokens | set(tokenize(" ".join(entry.achievements)))
+    required_tokens = {token for skill in job.required_skills for token in tokenize(skill)}
+    skill_signal = (
+        len(context & required_tokens) / len(required_tokens) if required_tokens else 0.0
+    )
+
+    return max(overlap, skill_signal, _UNRELATED_EXPERIENCE_FLOOR)
+
+
 def _experience_score(
     job: JobProfile, candidate: CandidateProfile
 ) -> tuple[float, ExperienceEvidence]:
-    candidate_years = candidate.total_years_experience
-    required_years = job.min_years_experience
+    """Scores tenure weighted by how relevant each role is.
 
-    if required_years <= 0:
-        return 1.0, ExperienceEvidence(
-            candidate_years=candidate_years, required_years=0.0, meets_requirement=True
-        )
+    Summing raw years treats a graphic designer's six years as equal to a backend
+    engineer's on a backend posting, on the component carrying the most weight.
+    """
+    total_years = candidate.total_years_experience
 
-    score = round(min(candidate_years / required_years, 1.0), 4)
-    return score, ExperienceEvidence(
-        candidate_years=candidate_years,
-        required_years=required_years,
-        meets_requirement=candidate_years >= required_years,
+    relevant_years = 0.0
+    relevant_roles: list[str] = []
+    unrelated_roles: list[str] = []
+
+    for entry in candidate.experience:
+        relevance = _role_relevance(job, entry)
+        relevant_years += entry.years * relevance
+        (relevant_roles if relevance >= _RELEVANCE_THRESHOLD else unrelated_roles).append(entry.role)
+
+    relevant_years = round(relevant_years, 2)
+    evidence = ExperienceEvidence(
+        candidate_years=total_years,
+        relevant_years=relevant_years,
+        required_years=job.min_years_experience,
+        relevant_roles=relevant_roles,
+        unrelated_roles=unrelated_roles,
     )
+
+    if job.min_years_experience <= 0:
+        return 1.0, evidence
+
+    evidence.meets_requirement = relevant_years >= job.min_years_experience
+    return round(min(relevant_years / job.min_years_experience, 1.0), 4), evidence
 
 
 def _education_score(

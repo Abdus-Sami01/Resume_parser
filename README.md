@@ -424,6 +424,30 @@ misses resumes written purely as date ranges (`Jan 2019 - Dec 2022`), which is
 most of them. A self-reported "N years" phrase is used only as a fallback when
 there are no dates to work from.
 
+Tenure is **weighted by role relevance**, not summed raw. Counting every year
+equally means a graphic designer's six years satisfy a backend posting's "5+ years"
+requirement exactly as well as a backend engineer's — on the component carrying the
+most weight:
+
+```
+Backend Dev      score=1.0   total=6.0y  relevant=6.0y  meets=True
+Designer         score=0.36  total=6.0y  relevant=1.8y  meets=False
+Career Changer   score=0.5   total=6.0y  relevant=2.5y  meets=False
+```
+
+Relevance is read from the role title and its achievements against the job title
+and required skills, so a "Platform Engineer" whose achievements name Python is
+credited in full — the title sharing no words with the posting does not make the
+work irrelevant. Unrelated roles keep a floor rather than dropping to zero: a
+decade in any professional role carries transferable judgement, it just is not
+what the posting asked for.
+
+One guard matters more than the rest: **a role the parser could not read scores
+1.0.** Docking a candidate for a gap in our own extraction would quietly punish
+whoever submitted a resume this system parsed badly. `relevant_years` sits beside
+`candidate_years` in the evidence so a recruiter can see why ten years scored like
+three.
+
 The job side reads its experience bar from the requirements block alone. Scanning
 a whole posting lets unrelated prose set it — "a company with 20 years of history"
 turns a 3-year requirement into a 20-year one, and a "preferred" nice-to-have

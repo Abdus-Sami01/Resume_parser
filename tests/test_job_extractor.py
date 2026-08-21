@@ -64,7 +64,11 @@ def test_a_qualified_candidate_is_not_penalised_by_unrelated_year_mentions():
 
     jd = "Backend role at a firm with 20 years of history.\n\nRequired:\n3+ years experience\n"
     job = HeuristicJobExtractor().extract("Backend Engineer", jd)
-    candidate = CandidateProfile(name="X", experience=[Experience(company="A", role="B", years=4)])
+    # A real role title: experience is now relevance-weighted, so a placeholder
+    # would score at the unrelated floor and obscure what this test is about.
+    candidate = CandidateProfile(
+        name="X", experience=[Experience(company="A", role="Backend Engineer", years=4)]
+    )
 
     score, evidence = _experience_score(job, candidate)
     assert score == 1.0

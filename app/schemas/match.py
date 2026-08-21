@@ -25,9 +25,12 @@ class SkillEvidence(BaseModel):
 
 
 class ExperienceEvidence(BaseModel):
-    candidate_years: float
-    required_years: float
-    meets_requirement: bool
+    candidate_years: float = Field(0.0, description="Total tenure across every role")
+    relevant_years: float = Field(0.0, description="Tenure weighted by role relevance")
+    required_years: float = 0.0
+    meets_requirement: bool = True
+    relevant_roles: list[str] = Field(default_factory=list)
+    unrelated_roles: list[str] = Field(default_factory=list)
 
 
 class EducationEvidence(BaseModel):

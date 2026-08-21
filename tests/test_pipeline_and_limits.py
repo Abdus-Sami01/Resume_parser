@@ -480,9 +480,11 @@ def test_blend_shifts_authority_between_reranker_and_structured_scoring(monkeypa
     from app.schemas.job import JobProfile
     from app.schemas.candidate import CandidateProfile, Experience
 
-    job = JobProfile(title="Eng", required_skills=["python"], min_years_experience=5)
+    job = JobProfile(title="Backend Engineer", required_skills=["python"], min_years_experience=5)
     candidate = CandidateProfile(
-        name="X", skills=["python"], experience=[Experience(company="A", role="B", years=10)]
+        name="X",
+        skills=["python"],
+        experience=[Experience(company="A", role="Backend Engineer", years=10)],
     )
 
     monkeypatch.setenv("RERANK_BLEND", "0.0")

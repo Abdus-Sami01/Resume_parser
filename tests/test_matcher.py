@@ -3,7 +3,7 @@ import sys
 
 from app.schemas.candidate import CandidateProfile, Experience
 from app.schemas.job import JobProfile, JobWeights
-from app.services.search.matcher import index_candidate, match
+from app.services.search.matcher import _experience_score, index_candidate, match
 from app.services.search.vector_store import payload_matches_filters, sparse_index
 
 STRONG_CANDIDATE = CandidateProfile(
@@ -527,3 +527,91 @@ def test_a_job_requiring_no_certifications_scores_everyone_equally():
     from app.services.search.matcher import _certifications_score
 
     assert _certifications_score(JOB, STRONG_CANDIDATE)[0] == 1.0
+
+
+# --- Relevance-weighted experience ----------------------------------------
+
+
+def _with_roles(*roles) -> CandidateProfile:
+    return STRONG_CANDIDATE.model_copy(
+        update={
+            "experience": [
+                Experience(company="C", role=role, years=years, achievements=list(notes))
+                for role, years, *notes in roles
+            ]
+        }
+    )
+
+
+BACKEND_JOB = JobProfile(
+    title="Backend Engineer", required_skills=["python"], min_years_experience=5
+)
+
+
+def test_relevant_experience_counts_in_full():
+    score, evidence = _experience_score(BACKEND_JOB, _with_roles(("Backend Engineer", 6)))
+
+    assert score == 1.0
+    assert evidence.relevant_years == 6.0
+    assert evidence.relevant_roles == ["Backend Engineer"]
+
+
+def test_unrelated_experience_does_not_satisfy_a_years_requirement():
+    """Six years of design is not six years of backend, on the heaviest-weighted component."""
+    score, evidence = _experience_score(BACKEND_JOB, _with_roles(("Graphic Designer", 6)))
+
+    assert score < 0.5
+    assert evidence.candidate_years == 6.0
+    assert evidence.relevant_years < 2.0
+    assert evidence.meets_requirement is False
+    assert evidence.unrelated_roles == ["Graphic Designer"]
+
+
+def test_unrelated_experience_still_counts_for_something():
+    """A decade in any professional role carries transferable judgement."""
+    score, evidence = _experience_score(BACKEND_JOB, _with_roles(("Graphic Designer", 6)))
+
+    assert score > 0
+    assert evidence.relevant_years > 0
+
+
+def test_a_career_changer_is_credited_only_for_the_relevant_part():
+    score, evidence = _experience_score(
+        BACKEND_JOB, _with_roles(("Graphic Designer", 5), ("Backend Engineer", 1))
+    )
+
+    assert evidence.candidate_years == 6.0
+    assert 1.0 < evidence.relevant_years < 4.0  # one real year, plus a floor on the rest
+    assert evidence.relevant_roles == ["Backend Engineer"]
+    assert evidence.unrelated_roles == ["Graphic Designer"]
+
+
+def test_a_different_title_doing_the_required_work_still_counts():
+    """"Platform Engineer" writing Python is Python experience, whatever the title says."""
+    score, _ = _experience_score(
+        BACKEND_JOB, _with_roles(("Platform Engineer", 6, "Built Python services"))
+    )
+
+    assert score == 1.0
+
+
+def test_a_role_the_parser_could_not_read_is_not_penalised():
+    """Docking a candidate for a gap in our own extraction punishes the wrong party."""
+    score, evidence = _experience_score(BACKEND_JOB, _with_roles(("Unknown", 6)))
+
+    assert score == 1.0
+    assert evidence.relevant_years == 6.0
+
+
+def test_a_job_with_no_years_requirement_still_scores_everyone_equally():
+    no_bar = BACKEND_JOB.model_copy(update={"min_years_experience": 0})
+
+    assert _experience_score(no_bar, _with_roles(("Graphic Designer", 6)))[0] == 1.0
+
+
+def test_evidence_separates_total_from_relevant_tenure():
+    """The recruiter needs to see why ten years scored like three."""
+    _, evidence = _experience_score(BACKEND_JOB, _with_roles(("Graphic Designer", 10)))
+
+    assert evidence.candidate_years == 10.0
+    assert evidence.relevant_years < evidence.candidate_years
