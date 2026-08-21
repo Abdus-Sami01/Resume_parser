@@ -1,3 +1,5 @@
+import pytest
+
 import subprocess
 import sys
 
@@ -615,3 +617,108 @@ def test_evidence_separates_total_from_relevant_tenure():
 
     assert evidence.candidate_years == 10.0
     assert evidence.relevant_years < evidence.candidate_years
+
+
+# --- Recency ---------------------------------------------------------------
+
+
+def _dated(role: str, years: float, ended: float | None, current: bool = False) -> CandidateProfile:
+    return STRONG_CANDIDATE.model_copy(
+        update={
+            "experience": [
+                Experience(
+                    company="C",
+                    role=role,
+                    years=years,
+                    start_year=(ended - years) if ended else None,
+                    end_year=ended,
+                    is_current=current,
+                )
+            ]
+        }
+    )
+
+
+def _this_year() -> float:
+    from datetime import date
+
+    return date.today().year
+
+
+def test_current_relevant_work_counts_in_full():
+    score, evidence = _experience_score(
+        BACKEND_JOB, _dated("Backend Engineer", 6, _this_year(), current=True)
+    )
+
+    assert score == 1.0
+    assert evidence.stale_roles == []
+
+
+def test_recent_work_is_not_discounted():
+    """A short gap is normal; only a long one should cost anything."""
+    score, _ = _experience_score(BACKEND_JOB, _dated("Backend Engineer", 6, _this_year() - 2))
+    assert score == 1.0
+
+
+def test_decade_old_relevant_work_is_discounted():
+    """Six years of backend ending in 2016 is not six years of current backend."""
+    score, evidence = _experience_score(BACKEND_JOB, _dated("Backend Engineer", 6, _this_year() - 10))
+
+    assert score < 0.6
+    assert evidence.relevant_years < evidence.candidate_years
+    assert evidence.stale_roles == ["Backend Engineer"]
+
+
+def test_stale_work_still_counts_for_something():
+    """Someone who shipped production Python a decade ago has not forgotten how."""
+    score, _ = _experience_score(BACKEND_JOB, _dated("Backend Engineer", 6, _this_year() - 25))
+    assert score > 0.3
+
+
+def test_recency_decay_is_monotonic():
+    scores = [
+        _experience_score(BACKEND_JOB, _dated("Backend Engineer", 6, _this_year() - gap))[0]
+        for gap in (0, 5, 10, 20)
+    ]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_a_role_without_dates_is_treated_as_current():
+    """The parser often cannot recover dates; that gap is ours, not the candidate's."""
+    score, evidence = _experience_score(BACKEND_JOB, _dated("Backend Engineer", 6, None))
+
+    assert score == 1.0
+    assert evidence.stale_roles == []
+
+
+def test_evidence_reports_when_the_relevant_work_ended():
+    _, evidence = _experience_score(BACKEND_JOB, _dated("Backend Engineer", 6, _this_year() - 10))
+    assert evidence.most_recent_relevant_year == pytest.approx(_this_year() - 10, abs=0.1)
+
+
+# --- Job lifecycle ---------------------------------------------------------
+
+
+def test_a_filled_role_is_not_recommended_to_candidates():
+    from app.db.job_store import get_job_store
+    from app.schemas.job import JobStatus
+    from app.services.search.matcher import match_jobs_for_candidate
+
+    store = get_job_store()
+    store.save(JOB.model_copy(update={"title": "Open Role"}))
+    store.save(JOB.model_copy(update={"title": "Filled Role", "status": JobStatus.FILLED}))
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+
+    titles = [result.job_title for result in match_jobs_for_candidate("strong")]
+
+    assert titles == ["Open Role"]
+
+
+def test_matching_a_closed_role_directly_still_works():
+    """Closing a req takes it out of recommendations, not out of the system."""
+    from app.schemas.job import JobStatus
+
+    index_candidate(STRONG_CANDIDATE, STRONG_TEXT, candidate_id="strong")
+    closed = JOB.model_copy(update={"status": JobStatus.CLOSED})
+
+    assert len(match(closed)) == 1

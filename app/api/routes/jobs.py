@@ -7,7 +7,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.db.job_store import get_job_store
-from app.schemas.job import JobProfile, JobWeights
+from app.schemas.job import JobProfile, JobStatus, JobWeights
 from app.schemas.match import MatchResult
 from app.services.extraction.job_extractor import get_job_extractor
 from app.services.privacy import pseudonym_for, redact_profile
@@ -55,8 +55,19 @@ async def create_job(request: JobParseRequest) -> StoredJob:
 
 @router.get("", response_model=JobPage)
 async def list_jobs(
-    offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200)
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    status: JobStatus | None = Query(None, description="Filter to one status"),
 ) -> JobPage:
+    if status is not None:
+        matching = [r for r in get_job_store().all() if r.profile.status == status]
+        return JobPage(
+            total=len(matching),
+            offset=offset,
+            limit=limit,
+            items=[_to_stored(r) for r in matching[offset : offset + limit]],
+        )
+
     records, total = get_job_store().page(offset=offset, limit=limit)
     return JobPage(
         total=total, offset=offset, limit=limit, items=[_to_stored(r) for r in records]
@@ -79,6 +90,34 @@ async def replace_job(job_id: str, request: JobParseRequest) -> StoredJob:
 
     profile = get_job_extractor().extract(request.title, request.description, request.weights)
     return _to_stored(store.save(profile, job_id=job_id))
+
+
+class JobStatusRequest(BaseModel):
+    status: JobStatus
+
+
+@router.patch("/{job_id}/status", response_model=StoredJob)
+async def set_job_status(job_id: str, request: JobStatusRequest) -> StoredJob:
+    """Changes a req's status without re-parsing it.
+
+    Closing a role keeps it and its pipeline readable — the hiring history is the
+    point — while taking it out of reverse matching and sourcing analytics.
+    """
+    store = get_job_store()
+    record = store.get(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    updated = record.profile.model_copy(update={"status": request.status})
+    return _to_stored(store.save(updated, job_id=job_id))
+
+
+@router.get("/{job_id}/status")
+async def read_job_status(job_id: str) -> dict:
+    record = get_job_store().get(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"job_id": job_id, "status": record.profile.status, "is_active": record.profile.is_active}
 
 
 @router.delete("/{job_id}", status_code=204)

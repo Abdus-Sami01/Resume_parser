@@ -14,6 +14,11 @@ class Experience(BaseModel):
     role: str
     years: float = Field(ge=0, description="Duration of this role, in years")
     achievements: list[str] = Field(default_factory=list)
+    # Decimal years (2019.5 = mid-2019). Kept because duration alone cannot
+    # distinguish six years of backend work ending in 2016 from six ending today.
+    start_year: float | None = None
+    end_year: float | None = None
+    is_current: bool = False
 
 
 class CandidateProfile(BaseModel):

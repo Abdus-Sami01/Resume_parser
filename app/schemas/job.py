@@ -1,5 +1,20 @@
 """Job description schema — separates required vs. preferred and carries section weights."""
+from enum import Enum
+
 from pydantic import BaseModel, Field, model_validator
+
+
+class JobStatus(str, Enum):
+    OPEN = "open"
+    ON_HOLD = "on_hold"
+    FILLED = "filled"
+    CLOSED = "closed"
+
+
+# Only an open role is actively recruiting. The rest stay readable — closing a
+# req must not erase its pipeline history — but they stop pulling candidates
+# toward work nobody is hiring for.
+ACTIVE_JOB_STATUSES: set[JobStatus] = {JobStatus.OPEN}
 
 
 class JobWeights(BaseModel):
@@ -20,6 +35,7 @@ class JobWeights(BaseModel):
 
 class JobProfile(BaseModel):
     title: str
+    status: JobStatus = JobStatus.OPEN
     company: str = ""
     location: str = ""
     remote: bool = False
@@ -33,6 +49,10 @@ class JobProfile(BaseModel):
     required_certifications: list[str] = Field(default_factory=list)
     description: str = ""
     weights: JobWeights = Field(default_factory=JobWeights)
+
+    @property
+    def is_active(self) -> bool:
+        return self.status in ACTIVE_JOB_STATUSES
 
     @property
     def all_skills(self) -> list[str]:

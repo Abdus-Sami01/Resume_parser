@@ -180,6 +180,7 @@ a slow network.
 | `POST /jobs` | Parse and persist, returns a `job_id`. |
 | `GET /jobs` | Paginated posting catalogue, newest first. |
 | `GET`/`PUT`/`DELETE /jobs/{job_id}` | Read, replace in place (keeping the id), or remove. |
+| `GET`/`PATCH /jobs/{job_id}/status` | Read or change a req's status without re-parsing it. |
 | `POST /jobs/{job_id}/match` | Re-run a saved posting against the current candidate pool. |
 
 **Search**
@@ -442,9 +443,28 @@ work irrelevant. Unrelated roles keep a floor rather than dropping to zero: a
 decade in any professional role carries transferable judgement, it just is not
 what the posting asked for.
 
+Tenure is also **discounted by recency**. The extractor parses date ranges, so
+each role carries when it happened, not just how long it lasted — six years of
+backend work ending in 2016 is not six years of current backend work:
+
+```
+current backend        score=1.0   relevant=6.0y
+ended 2 yrs ago        score=1.0   relevant=6.0y
+ended 10 yrs ago       score=0.5   relevant=2.5y   stale=['Backend Engineer']
+ended 20 yrs ago       score=0.48  relevant=2.4y   stale=['Backend Engineer']
+```
+
+Recent work within a three-year grace window counts in full, then decays on a
+half-life toward a floor rather than to zero — someone who shipped production
+Python a decade ago has not forgotten how to program. `stale_roles` and
+`most_recent_relevant_year` travel in the evidence so the discount is visible
+rather than mysterious.
+
 One guard matters more than the rest: **a role the parser could not read scores
 1.0.** Docking a candidate for a gap in our own extraction would quietly punish
-whoever submitted a resume this system parsed badly. `relevant_years` sits beside
+whoever submitted a resume this system parsed badly. The same rule covers dates:
+**a role with no end date is treated as current**, because a missing date is our
+parsing gap, not evidence the work is old. `relevant_years` sits beside
 `candidate_years` in the evidence so a recruiter can see why ten years scored like
 three.
 
@@ -595,6 +615,26 @@ empty, so an older resume fills gaps the newer one dropped. Pipeline entries mov
 with the person — losing the stage someone reached because the wrong record won a
 merge would be the more damaging failure. When both records sat in the same
 pipeline, the further-along stage survives.
+
+## Job lifecycle
+
+A req is `open`, `on_hold`, `filled`, or `closed`. Only an open role is actively
+recruiting, and the distinction matters in two places that were previously wrong:
+
+```
+both open:      reverse match: ['Backend Engineer', 'Platform Engineer']
+                skill gaps:    [terraform, kafka, kubernetes, python]
+
+backend filled: reverse match: ['Platform Engineer']
+                skill gaps:    [terraform, kubernetes]
+```
+
+Recommending a candidate toward a filled role wastes their time, and sourcing
+against a closed req's requirements wastes the recruiter's. Closing a role does
+**not** hide it: `GET /jobs/{id}` still works, its pipeline history is intact, and
+matching it directly still runs — the hiring record is the point of keeping it.
+`PATCH /jobs/{id}/status` changes status without re-parsing the posting, so the
+extracted requirements survive.
 
 ## Time in stage
 

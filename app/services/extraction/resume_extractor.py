@@ -124,17 +124,28 @@ class HeuristicResumeExtractor:
             if not match:
                 continue
 
-            years = cls._range_duration_years(match)
-            if years is None:
+            span = cls._range_span(match)
+            if span is None:
                 continue
+            start, end, is_current = span
 
             role, company = cls._split_role_and_company(line[: match.start()] + line[match.end() :])
-            entries.append(Experience(company=company, role=role, years=years))
+            entries.append(
+                Experience(
+                    company=company,
+                    role=role,
+                    years=round(end - start, 2),
+                    start_year=round(start, 2),
+                    end_year=round(end, 2),
+                    is_current=is_current,
+                )
+            )
 
         return entries
 
     @staticmethod
-    def _range_duration_years(match: re.Match) -> float | None:
+    def _range_span(match: re.Match) -> tuple[float, float, bool] | None:
+        """Returns (start, end, still_here) as decimal years, or None if unusable."""
         start_month, start_year, end_month, end_year, present = match.groups()
 
         def to_decimal_year(month: str | None, year: str) -> float:
@@ -142,7 +153,9 @@ class HeuristicResumeExtractor:
             return int(year) + (month_index - 1) / 12
 
         start = to_decimal_year(start_month, start_year)
-        if present:
+        is_current = bool(present)
+
+        if is_current:
             today = date.today()
             end = today.year + (today.month - 1) / 12
         elif end_year:
@@ -150,8 +163,7 @@ class HeuristicResumeExtractor:
         else:
             return None
 
-        duration = end - start
-        return round(duration, 2) if duration > 0 else None
+        return (start, end, is_current) if end > start else None
 
     @staticmethod
     def _split_role_and_company(remainder: str) -> tuple[str, str]:

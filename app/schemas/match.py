@@ -31,6 +31,10 @@ class ExperienceEvidence(BaseModel):
     meets_requirement: bool = True
     relevant_roles: list[str] = Field(default_factory=list)
     unrelated_roles: list[str] = Field(default_factory=list)
+    stale_roles: list[str] = Field(
+        default_factory=list, description="Relevant work that ended long enough ago to be discounted"
+    )
+    most_recent_relevant_year: float | None = None
 
 
 class EducationEvidence(BaseModel):

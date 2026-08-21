@@ -209,6 +209,39 @@ def _skills_score(job: JobProfile, candidate: CandidateProfile) -> tuple[float, 
 _UNRELATED_EXPERIENCE_FLOOR = 0.3
 _RELEVANCE_THRESHOLD = 0.5
 
+# Skills go stale. Work ending within this window counts in full; beyond it,
+# credit decays toward a floor rather than vanishing — someone who shipped
+# production Python a decade ago has not forgotten how to program.
+_RECENCY_GRACE_YEARS = 3.0
+_RECENCY_HALF_LIFE_YEARS = 6.0
+_RECENCY_FLOOR = 0.4
+_STALE_AFTER_YEARS = 8.0
+
+
+def _current_decimal_year() -> float:
+    from datetime import date
+
+    today = date.today()
+    return today.year + (today.month - 1) / 12
+
+
+def _recency_factor(entry, now: float) -> float:
+    """Discounts work by how long ago it ended.
+
+    A role with no end date carries no signal, so it is treated as current —
+    the same principle as an unreadable role title: our parsing gap must not
+    become the candidate's penalty.
+    """
+    if entry.is_current or entry.end_year is None:
+        return 1.0
+
+    years_ago = max(now - entry.end_year, 0.0)
+    if years_ago <= _RECENCY_GRACE_YEARS:
+        return 1.0
+
+    decayed = 0.5 ** ((years_ago - _RECENCY_GRACE_YEARS) / _RECENCY_HALF_LIFE_YEARS)
+    return max(decayed, _RECENCY_FLOOR)
+
 
 def _role_relevance(job: JobProfile, entry) -> float:
     """How much a single role counts toward a posting's experience requirement.
@@ -246,14 +279,27 @@ def _experience_score(
     """
     total_years = candidate.total_years_experience
 
+    now = _current_decimal_year()
+
     relevant_years = 0.0
     relevant_roles: list[str] = []
     unrelated_roles: list[str] = []
+    stale_roles: list[str] = []
+    most_recent_relevant: float | None = None
 
     for entry in candidate.experience:
         relevance = _role_relevance(job, entry)
-        relevant_years += entry.years * relevance
-        (relevant_roles if relevance >= _RELEVANCE_THRESHOLD else unrelated_roles).append(entry.role)
+        recency = _recency_factor(entry, now)
+        relevant_years += entry.years * relevance * recency
+
+        if relevance >= _RELEVANCE_THRESHOLD:
+            relevant_roles.append(entry.role)
+            ended = now if (entry.is_current or entry.end_year is None) else entry.end_year
+            most_recent_relevant = max(most_recent_relevant or ended, ended)
+            if now - ended > _STALE_AFTER_YEARS:
+                stale_roles.append(entry.role)
+        else:
+            unrelated_roles.append(entry.role)
 
     relevant_years = round(relevant_years, 2)
     evidence = ExperienceEvidence(
@@ -262,6 +308,8 @@ def _experience_score(
         required_years=job.min_years_experience,
         relevant_roles=relevant_roles,
         unrelated_roles=unrelated_roles,
+        stale_roles=stale_roles,
+        most_recent_relevant_year=round(most_recent_relevant, 2) if most_recent_relevant else None,
     )
 
     if job.min_years_experience <= 0:
@@ -401,7 +449,8 @@ def match_jobs_for_candidate(
     if record is None:
         return []
 
-    job_records = job_store.all()
+    # A filled or closed req is not something to recommend anyone toward.
+    job_records = [record for record in job_store.all() if record.profile.is_active]
     if not job_records:
         return []
 

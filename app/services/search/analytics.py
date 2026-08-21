@@ -37,7 +37,7 @@ class SkillGap:
 @dataclass
 class PoolOverview:
     total_candidates: int
-    total_jobs: int
+    total_jobs: int  # open roles only
     distinct_skills: int
     median_years_experience: float
     experience_distribution: dict[str, int] = field(default_factory=dict)
@@ -64,7 +64,7 @@ def _band_for(years: float) -> str:
 
 def build_overview(top_skills_limit: int = 10, gap_limit: int = 10) -> PoolOverview:
     candidates = get_candidate_store().all()
-    jobs = get_job_store().all()
+    jobs = [r for r in get_job_store().all() if r.profile.is_active]
 
     skill_counts: Counter = Counter()
     experience_bands = {label: 0 for label, _, _ in _EXPERIENCE_BANDS}
@@ -103,6 +103,9 @@ def _skill_gaps(skill_counts: Counter, total_candidates: int, limit: int) -> lis
     """
     demand: Counter = Counter()
     for record in get_job_store().all():
+        # Counting closed reqs would send sourcing after roles nobody is hiring for.
+        if not record.profile.is_active:
+            continue
         for skill in set(record.profile.required_skills):
             demand[skill] += 1
 

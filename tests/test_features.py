@@ -224,3 +224,58 @@ def test_csv_export_for_unknown_job_is_a_404():
 def test_total_years_experience_is_returned_by_the_api(pool):
     profile = client.get(f"/resumes/{pool['Jane Doe']}").json()
     assert profile["total_years_experience"] > 7
+
+
+# --- Job status ------------------------------------------------------------
+
+
+def test_job_status_defaults_to_open():
+    created = client.post("/jobs", json={"title": "Eng", "description": "Required:\nPython\n"}).json()
+    assert created["profile"]["status"] == "open"
+
+
+def test_status_can_be_changed_without_reparsing():
+    job_id = client.post(
+        "/jobs", json={"title": "Eng", "description": "Required:\nPython, PostgreSQL\n"}
+    ).json()["job_id"]
+
+    updated = client.patch(f"/jobs/{job_id}/status", json={"status": "filled"})
+
+    assert updated.status_code == 200
+    assert updated.json()["profile"]["status"] == "filled"
+    # The parsed requirements survive the status change.
+    assert "python" in updated.json()["profile"]["required_skills"]
+
+
+def test_closed_roles_drop_out_of_skill_gap_analysis(pool):
+    """Sourcing against a req nobody is hiring for is wasted effort."""
+    job_id = client.post(
+        "/jobs", json={"title": "Data", "description": "Required:\nKafka\n"}
+    ).json()["job_id"]
+    assert any(g["skill"] == "kafka" for g in client.get("/analytics/overview").json()["skill_gaps"])
+
+    client.patch(f"/jobs/{job_id}/status", json={"status": "closed"})
+
+    assert not any(
+        g["skill"] == "kafka" for g in client.get("/analytics/overview").json()["skill_gaps"]
+    )
+
+
+def test_jobs_can_be_filtered_by_status():
+    open_id = client.post("/jobs", json={"title": "Open", "description": "Required:\nPython\n"}).json()["job_id"]
+    filled_id = client.post("/jobs", json={"title": "Filled", "description": "Required:\nPython\n"}).json()["job_id"]
+    client.patch(f"/jobs/{filled_id}/status", json={"status": "filled"})
+
+    assert [i["profile"]["title"] for i in client.get("/jobs?status=open").json()["items"]] == ["Open"]
+    assert [i["profile"]["title"] for i in client.get("/jobs?status=filled").json()["items"]] == ["Filled"]
+    assert client.get("/jobs").json()["total"] == 2  # unfiltered still shows everything
+
+
+def test_status_endpoints_404_on_an_unknown_job():
+    assert client.get("/jobs/nope/status").status_code == 404
+    assert client.patch("/jobs/nope/status", json={"status": "closed"}).status_code == 404
+
+
+def test_an_invalid_status_is_rejected():
+    job_id = client.post("/jobs", json={"title": "Eng", "description": "Required:\nPython\n"}).json()["job_id"]
+    assert client.patch(f"/jobs/{job_id}/status", json={"status": "banana"}).status_code == 422

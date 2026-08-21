@@ -153,3 +153,23 @@ def test_table_laid_out_resume_still_yields_a_full_profile():
     assert profile.experience[0].role == "Senior Backend Engineer"
     assert profile.experience[0].company == "Acme Corp"
     assert profile.experience[0].years > 3
+
+
+def test_role_dates_are_kept_not_just_the_duration():
+    """Duration alone cannot distinguish six years ending in 2016 from six ending today."""
+    profile = HeuristicResumeExtractor().extract(
+        "Ann Lee\nBackend Engineer, Acme Corp, Jan 2010 - Dec 2016\n"
+    )
+
+    entry = profile.experience[0]
+    assert entry.start_year == pytest.approx(2010.0, abs=0.1)
+    assert entry.end_year == pytest.approx(2016.92, abs=0.1)
+    assert entry.is_current is False
+
+
+def test_an_open_ended_role_is_marked_current():
+    profile = HeuristicResumeExtractor().extract(
+        "Ann Lee\nStaff Engineer, Nova Labs, Mar 2021 - Present\n"
+    )
+
+    assert profile.experience[0].is_current is True
