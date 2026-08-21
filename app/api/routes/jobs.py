@@ -124,10 +124,14 @@ _EXPORT_COLUMNS = [
     "skills_score",
     "experience_score",
     "education_score",
+    "certification_score",
     "years_experience",
     "required_years",
+    "degree_matched",
     "matched_required_skills",
     "missing_required_skills",
+    "matched_certifications",
+    "missing_certifications",
 ]
 
 
@@ -162,10 +166,14 @@ async def export_matches_csv(
                 f"{result.breakdown.skills:.4f}",
                 f"{result.breakdown.experience:.4f}",
                 f"{result.breakdown.education:.4f}",
+                f"{result.breakdown.certifications:.4f}",
                 result.evidence.experience.candidate_years,
                 result.evidence.experience.required_years,
+                result.evidence.education.matched_degree or "",
                 "; ".join(result.evidence.skills.matched_required),
                 "; ".join(result.evidence.skills.missing_required),
+                "; ".join(result.evidence.certifications.matched),
+                "; ".join(result.evidence.certifications.missing),
             ]
         )
 

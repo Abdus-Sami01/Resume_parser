@@ -338,3 +338,170 @@ def test_health_is_never_throttled(throttled):
 
 def test_limiting_is_off_by_default():
     assert [client.get("/jobs").status_code for _ in range(6)] == [200] * 6
+
+
+# --- Shortlisting: match straight into the pipeline -----------------------
+
+
+def test_shortlist_adds_the_top_matches_in_one_call(board):
+    """Acting on a top-ten used to mean eleven requests and a client-side loop."""
+    response = client.post(
+        f"/jobs/{board['job_id']}/pipeline/shortlist",
+        json={"top_n": 2, "stage": "screening", "actor": "recruiter@co"},
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["added"] == 2
+    assert all(entry["stage"] == "screening" for entry in body["entries"])
+    assert client.get(f"/jobs/{board['job_id']}/pipeline").json()["total"] == 2
+
+
+def test_shortlist_preserves_match_order(board):
+    ranked = [
+        result["candidate_id"] for result in client.post(f"/jobs/{board['job_id']}/match").json()
+    ]
+
+    entries = client.post(
+        f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 2}
+    ).json()["entries"]
+
+    assert [entry["candidate_id"] for entry in entries] == ranked[:2]
+
+
+def test_reshortlisting_reports_the_overlap_instead_of_failing(board):
+    """Re-running after new resumes arrive is the normal use, and must not error."""
+    client.post(f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 2})
+
+    second = client.post(f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 2}).json()
+
+    assert second["added"] == 0
+    assert second["skipped"] == 2
+    assert {d["reason"] for d in second["skipped_details"]} == {"already in pipeline"}
+
+
+def test_shortlist_respects_a_minimum_score(board):
+    everyone = client.post(
+        f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 10}
+    ).json()["added"]
+
+    # Clear and retry with a floor no candidate can clear.
+    for entry in client.get(f"/jobs/{board['job_id']}/pipeline").json()["items"]:
+        client.delete(f"/jobs/{board['job_id']}/pipeline/{entry['entry']['candidate_id']}")
+
+    none_qualify = client.post(
+        f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 10, "min_score": 0.99}
+    ).json()
+
+    assert everyone > 0
+    assert none_qualify["added"] == 0
+
+
+def test_shortlisting_an_unknown_job_is_a_404():
+    assert client.post("/jobs/nope/pipeline/shortlist", json={"top_n": 5}).status_code == 404
+
+
+def test_shortlist_route_is_not_shadowed_by_the_candidate_route(board):
+    """`/pipeline/shortlist` sits beside `/pipeline/{candidate_id}`."""
+    assert client.post(
+        f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 1}
+    ).status_code == 201
+
+
+# --- Bulk stage moves -----------------------------------------------------
+
+
+def test_bulk_move_advances_many_candidates_at_once(board):
+    entries = client.post(
+        f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 2}
+    ).json()["entries"]
+    ids = [entry["candidate_id"] for entry in entries]
+
+    response = client.patch(
+        f"/jobs/{board['job_id']}/pipeline",
+        json={"candidate_ids": ids, "stage": "rejected", "note": "below bar"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["moved"] == 2
+    assert client.get(f"/jobs/{board['job_id']}/pipeline").json()["stage_counts"] == {"rejected": 2}
+
+
+def test_one_bad_id_does_not_discard_the_rest_of_the_batch(board):
+    entries = client.post(
+        f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 2}
+    ).json()["entries"]
+    ids = [entry["candidate_id"] for entry in entries]
+
+    body = client.patch(
+        f"/jobs/{board['job_id']}/pipeline",
+        json={"candidate_ids": ids + ["ghost-id"], "stage": "rejected"},
+    ).json()
+
+    assert body["moved"] == 2
+    assert body["failed"] == 1
+    assert body["failed_details"][0]["candidate_id"] == "ghost-id"
+
+
+def test_bulk_move_records_history_for_every_candidate(board):
+    entries = client.post(
+        f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 2}
+    ).json()["entries"]
+
+    client.patch(
+        f"/jobs/{board['job_id']}/pipeline",
+        json={
+            "candidate_ids": [e["candidate_id"] for e in entries],
+            "stage": "rejected",
+            "note": "below bar",
+            "actor": "hm@co",
+        },
+    )
+
+    for item in client.get(f"/jobs/{board['job_id']}/pipeline").json()["items"]:
+        latest = item["entry"]["history"][-1]
+        assert latest["to_stage"] == "rejected"
+        assert latest["note"] == "below bar"
+        assert latest["actor"] == "hm@co"
+
+
+def test_bulk_move_requires_at_least_one_candidate(board):
+    assert client.patch(
+        f"/jobs/{board['job_id']}/pipeline", json={"candidate_ids": [], "stage": "rejected"}
+    ).status_code == 422
+
+
+# --- Reranker blend -------------------------------------------------------
+
+
+def test_blend_shifts_authority_between_reranker_and_structured_scoring(monkeypatch):
+    """The lexical fallback rewards terse resumes; the blend is how that gets dialled down."""
+    from app.services.search.matcher import _score_breakdown
+    from app.schemas.job import JobProfile
+    from app.schemas.candidate import CandidateProfile, Experience
+
+    job = JobProfile(title="Eng", required_skills=["python"], min_years_experience=5)
+    candidate = CandidateProfile(
+        name="X", skills=["python"], experience=[Experience(company="A", role="B", years=10)]
+    )
+
+    monkeypatch.setenv("RERANK_BLEND", "0.0")
+    get_settings.cache_clear()
+    structured_only, _ = _score_breakdown(job, candidate, retrieval_score=0.0, rerank_score=0.0)
+
+    monkeypatch.setenv("RERANK_BLEND", "1.0")
+    get_settings.cache_clear()
+    rerank_only, _ = _score_breakdown(job, candidate, retrieval_score=0.0, rerank_score=0.0)
+
+    assert structured_only.weighted_total > 0.9  # perfect structured fit
+    assert rerank_only.weighted_total == 0.0  # rerank score of zero dominates
+    get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("bad", ["-0.1", "1.5"])
+def test_an_out_of_range_blend_is_rejected(monkeypatch, bad):
+    monkeypatch.setenv("RERANK_BLEND", bad)
+    get_settings.cache_clear()
+    with pytest.raises(Exception):
+        get_settings()
+    get_settings.cache_clear()

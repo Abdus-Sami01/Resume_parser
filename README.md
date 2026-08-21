@@ -195,6 +195,8 @@ a slow network.
 | Endpoint | Purpose |
 |---|---|
 | `POST /jobs/{job_id}/pipeline` | Add a candidate to a role's pipeline. |
+| `POST /jobs/{job_id}/pipeline/shortlist` | Run the match and add the top results in one call. |
+| `PATCH /jobs/{job_id}/pipeline` | Move several candidates at once. |
 | `GET /jobs/{job_id}/pipeline` | The board, with per-stage counts. Supports `?stage=` and `?blind=true`. |
 | `PATCH /jobs/{job_id}/pipeline/{candidate_id}` | Move a stage, appending to the audit trail. |
 | `DELETE /jobs/{job_id}/pipeline/{candidate_id}` | Remove from the pipeline. |
@@ -319,6 +321,28 @@ screening -> interview by hm@co        'panel booked'
 
 Moving to the stage someone is already in is a no-op, so a mis-click never lands
 in the history as a decision that was made.
+
+### Shortlisting
+
+Matching produced a ranked list and the pipeline accepted one candidate per call,
+so acting on a top-ten meant eleven requests plus a client-side loop that had to
+re-derive the ranking to know what to send. `POST /jobs/{id}/pipeline/shortlist`
+closes that loop:
+
+```json
+{ "top_n": 3, "min_score": 0.55, "stage": "screening", "actor": "recruiter@co" }
+→ { "added": 3, "skipped": 0, "entries": [...] }
+```
+
+Re-running it after new resumes arrive is the normal way to use it, so candidates
+already in the pipeline are **reported as skipped rather than raised** — the
+overlap must not fail the call. `min_score` stops at the first result below the
+floor, since the list is already ranked.
+
+`PATCH /jobs/{id}/pipeline` moves a batch: rejecting the tail of a shortlist is
+one decision, not twenty. One stale id does not discard the other nineteen moves —
+failures come back per candidate, and every successful move still lands in the
+audit trail with its note and actor.
 
 ### Funnel
 
@@ -498,6 +522,27 @@ Ann Lee  total=0.6857  edu=1.00 cert=1.00   M.S. Computer Science + AWS cert
 Ben Ray  total=0.4673  edu=0.60 cert=0.00   B.A. History, no cert
 Cara Yu  total=0.4403  edu=0.00 cert=0.00   no degree, no cert
 ```
+
+## The reranker blend
+
+`RERANK_BLEND` (default 0.5) sets how much of the final score comes from stage-2
+reranking, with the rest from the structured components. It used to be a hardcoded
+`0.5` inside the scorer, which is the wrong shape for a value whose right setting
+depends on **which reranker is running**.
+
+A cross-encoder that judges (job, resume) jointly earns a large share. The lexical
+fallback is token overlap, which rewards a document for being short. That is not
+hypothetical — with both candidates fully covering the requirements and no
+years/education/certification bar to separate them, the structured halves tie
+exactly and the terser resume wins outright on density:
+
+```
+rerank_blend=0.5   Ann 0.6429   Ben 0.3893
+rerank_blend=0.25  Ann 0.8214   Ben 0.4840
+```
+
+Lower it when running `RERANKER_BACKEND=lexical`; leave it at 0.5 or raise it once
+a real cross-encoder is in place.
 
 ## Notes on the search backends
 

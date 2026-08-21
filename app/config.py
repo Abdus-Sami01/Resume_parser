@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # Uploads
     max_upload_bytes: int = 10 * 1024 * 1024
 
+    # Share of the final score given to the stage-2 reranker; the rest goes to the
+    # structured skills/experience/education/certification components.
+    rerank_blend: float = 0.5
+
     # Retrieval
     retrieval_top_k: int = 50
     rerank_top_n: int = 10
@@ -67,6 +71,12 @@ class Settings(BaseSettings):
     # "celery" dispatches to a worker over Redis.
     task_backend: Literal["eager", "celery"] = "eager"
     redis_url: str = "redis://localhost:6379/0"
+
+    @model_validator(mode="after")
+    def _blend_in_range(self) -> "Settings":
+        if not 0.0 <= self.rerank_blend <= 1.0:
+            raise ValueError(f"rerank_blend must be within [0, 1], got {self.rerank_blend}")
+        return self
 
     @model_validator(mode="after")
     def _weights_sum_to_one(self) -> "Settings":

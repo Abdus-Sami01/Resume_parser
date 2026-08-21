@@ -116,3 +116,67 @@ def funnel_for_job(job_id: str) -> dict:
         "steps": steps,
         "exits": {stage.value: current.get(stage, 0) for stage in EXIT_STAGES},
     }
+
+
+def shortlist_from_match(
+    job_id: str,
+    top_n: int = 10,
+    min_score: float = 0.0,
+    stage: Stage = Stage.APPLIED,
+    note: str = "",
+    actor: str = "",
+) -> dict:
+    """Runs the match and adds the result to the pipeline in one step.
+
+    Shortlisting was the one thing the system made hard: matching produced a
+    ranked list and the pipeline accepted one candidate per call, so acting on a
+    top-ten meant eleven requests and a client-side loop that had to re-derive the
+    ranking to know what to send.
+
+    Candidates already in the pipeline are reported as skipped rather than raised,
+    because re-shortlisting after new resumes arrive is the normal way to use this
+    and must not fail on the overlap.
+    """
+    from app.db.job_store import get_job_store
+    from app.services.search.matcher import match
+
+    record = get_job_store().get(job_id)
+    if record is None:
+        raise PipelineError("job not found")
+
+    added: list[PipelineEntry] = []
+    skipped: list[dict] = []
+
+    for result in match(record.profile, top_n=top_n):
+        if result.final_score < min_score:
+            # Ranked order means everything after this is below the floor too.
+            break
+
+        try:
+            added.append(
+                add_candidate(job_id, result.candidate_id, stage, note=note, actor=actor)
+            )
+        except PipelineError:
+            skipped.append({"candidate_id": result.candidate_id, "reason": "already in pipeline"})
+
+    return {"added": len(added), "skipped": len(skipped), "entries": added, "skipped_details": skipped}
+
+
+def move_many(
+    job_id: str, candidate_ids: list[str], stage: Stage, note: str = "", actor: str = ""
+) -> dict:
+    """Moves a batch, reporting per-candidate outcomes.
+
+    Rejecting the tail of a shortlist is one decision, not twenty, and one id that
+    is no longer in the pipeline must not discard the other nineteen moves.
+    """
+    moved: list[PipelineEntry] = []
+    failed: list[dict] = []
+
+    for candidate_id in candidate_ids:
+        try:
+            moved.append(move_candidate(job_id, candidate_id, stage, note=note, actor=actor))
+        except PipelineError as exc:
+            failed.append({"candidate_id": candidate_id, "reason": str(exc)})
+
+    return {"moved": len(moved), "failed": len(failed), "entries": moved, "failed_details": failed}

@@ -154,7 +154,13 @@ def _score_breakdown(
         + job.weights.education * education_score
         + job.weights.certifications * certification_score
     )
-    weighted_total = 0.5 * rerank_score + 0.5 * structured_score
+    # How much authority the reranker gets is a property of which reranker is
+    # running. A cross-encoder judging (job, resume) jointly earns a large share;
+    # the lexical fallback is token overlap, which rewards short documents for
+    # being short — with `rerank_blend` at 0.5 and the structured components tied,
+    # a terser resume wins outright. Lower it when running the fallback.
+    blend = get_settings().rerank_blend
+    weighted_total = blend * rerank_score + (1.0 - blend) * structured_score
 
     breakdown = ScoreBreakdown(
         skills=skills_score,

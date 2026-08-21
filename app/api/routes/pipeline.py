@@ -25,6 +25,39 @@ class MoveStageRequest(BaseModel):
     actor: str = ""
 
 
+class ShortlistRequest(BaseModel):
+    """Match and shortlist in one step, rather than one request per candidate."""
+
+    top_n: int = Field(10, ge=1, le=200)
+    min_score: float = Field(
+        0.0, ge=0.0, le=1.0, description="Skip anyone scoring below this"
+    )
+    stage: Stage = Stage.APPLIED
+    note: str = ""
+    actor: str = ""
+
+
+class ShortlistResponse(BaseModel):
+    added: int
+    skipped: int
+    entries: list[PipelineEntry]
+    skipped_details: list[dict]
+
+
+class BulkMoveRequest(BaseModel):
+    candidate_ids: list[str] = Field(..., min_length=1)
+    stage: Stage
+    note: str = ""
+    actor: str = ""
+
+
+class BulkMoveResponse(BaseModel):
+    moved: int
+    failed: int
+    entries: list[PipelineEntry]
+    failed_details: list[dict]
+
+
 class PipelineItem(BaseModel):
     entry: PipelineEntry
     candidate_name: str
@@ -67,6 +100,38 @@ async def add_to_pipeline(job_id: str, request: AddToPipelineRequest) -> Pipelin
         )
     except PipelineError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/jobs/{job_id}/pipeline/shortlist", response_model=ShortlistResponse, status_code=201)
+async def shortlist(job_id: str, request: ShortlistRequest) -> ShortlistResponse:
+    """Runs the match and puts the top results straight into the pipeline."""
+    _require_job(job_id)
+
+    try:
+        result = pipeline_service.shortlist_from_match(
+            job_id,
+            top_n=request.top_n,
+            min_score=request.min_score,
+            stage=request.stage,
+            note=request.note,
+            actor=request.actor,
+        )
+    except PipelineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return ShortlistResponse(**result)
+
+
+@router.patch("/jobs/{job_id}/pipeline", response_model=BulkMoveResponse)
+async def bulk_move(job_id: str, request: BulkMoveRequest) -> BulkMoveResponse:
+    """Moves several candidates at once — rejecting a tail is one decision, not twenty."""
+    _require_job(job_id)
+
+    return BulkMoveResponse(
+        **pipeline_service.move_many(
+            job_id, request.candidate_ids, request.stage, request.note, request.actor
+        )
+    )
 
 
 @router.get("/jobs/{job_id}/pipeline", response_model=PipelineList)
