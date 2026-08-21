@@ -189,6 +189,9 @@ a slow network.
 | `POST /search/match` | Match an ad-hoc job profile without persisting it. |
 | `POST /search/candidates` | Search the pool directly — free text plus skills, location, and experience range. |
 | `GET /resumes/{candidate_id}/similar` | "More people like this one." |
+| `GET /resumes/duplicates` | Likely same-person records across the pool. |
+| `GET /resumes/{candidate_id}/duplicates` | Likely duplicates of one candidate. |
+| `POST /resumes/{candidate_id}/merge` | Fold another record into this one. |
 
 **Hiring pipeline**
 
@@ -451,6 +454,11 @@ outranks the real minimum. Either one quietly fails qualified candidates.
   updates one candidate; an edited resume from the same person creates a second.
   Merging by email is a product decision about overwriting history, so it is
   left open deliberately.
+- **Institution names are keyword-matched.** The parser recognises "Stanford
+  University" but not bare acronyms like "MIT" or "Caltech", so those land with an
+  empty institution. The degree and field still extract correctly.
+- **Duplicate scanning is pairwise.** Fine at recruiting scale; a pool in the
+  hundreds of thousands needs blocking on a cheap key before comparison.
 - **CJK is not word-segmented.** Tokenization keeps CJK runs intact rather than
   dropping them, but does not split them into words; that needs a segmenter.
 
@@ -522,6 +530,62 @@ Ann Lee  total=0.6857  edu=1.00 cert=1.00   M.S. Computer Science + AWS cert
 Ben Ray  total=0.4673  edu=0.60 cert=0.00   B.A. History, no cert
 Cara Yu  total=0.4403  edu=0.00 cert=0.00   no degree, no cert
 ```
+
+## Duplicate candidates
+
+Content-hash deduplication catches the same file uploaded twice. It cannot catch
+the far more common case — the same person applying again with an **updated**
+resume, which produces a second record and puts them in every shortlist twice:
+
+```
+pool:      Jane Doe ['python','postgresql']            <- last year's resume
+           Jane Doe ['python','postgresql','aws',...]  <- this year's
+shortlist: ['Jane Doe', 'Jane Doe', 'John Smith']
+```
+
+`GET /resumes/duplicates` weighs several independent signals and says which fired:
+
+```
+high  b993dfd9 ~ 1a16fade  reasons: ['identical email', 'identical name']
+```
+
+Email is strong but often missing from a parsed resume, and a matching name alone
+is not evidence — two people really are called John Smith. So the weaker signals
+require corroboration (skill overlap, phone, or resume-text overlap) before a pair
+is reported at all.
+
+**Detection and merging are deliberately separate.** Collapsing two records
+discards a version of someone's history, which is a judgement with consequences,
+so nothing merges automatically. `POST /resumes/{id}/merge` performs it when a
+human decides:
+
+```
+skills unioned : ['python','postgresql','aws','docker']
+phone recovered from the older resume: '+1 415-555-0100'
+pipeline history carried across: {'interview': 1}   <- re-keyed to the survivor
+shortlist now  : ['Jane Doe', 'John Smith']
+```
+
+Lists are unioned and scalars keep the surviving record's value unless it is
+empty, so an older resume fills gaps the newer one dropped. Pipeline entries move
+with the person — losing the stage someone reached because the wrong record won a
+merge would be the more damaging failure. When both records sat in the same
+pipeline, the further-along stage survives.
+
+## Time in stage
+
+`average_days_in_stage` on the funnel reports how long candidates sat at each
+stage before moving on:
+
+```
+average_days_in_stage: {'applied': 9.0}
+```
+
+A funnel says where people drop out; this says where they get **stuck**, which is
+the actionable half — a stage nobody leaves for nine days is a scheduling problem,
+not a candidate-quality one. Only completed spans are averaged: someone still
+sitting in a stage has no duration yet, and counting the open span would drag
+every average toward zero.
 
 ## The reranker blend
 

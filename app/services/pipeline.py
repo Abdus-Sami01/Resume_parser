@@ -78,6 +78,28 @@ def entries_for_candidate(candidate_id: str) -> list[PipelineEntry]:
     )
 
 
+def _average_days_in_stage(entries: list[PipelineEntry]) -> dict[str, float | None]:
+    """How long candidates sat at each stage before moving on.
+
+    A funnel says where people drop out; this says where they get stuck, which is
+    the actionable half — a stage nobody leaves for three weeks is a scheduling
+    problem, not a candidate-quality one. Only completed spans are averaged;
+    someone still sitting in a stage has no duration yet and would drag the
+    average down toward zero if counted.
+    """
+    durations: dict[str, list[float]] = {}
+
+    for entry in entries:
+        for current, following in zip(entry.history, entry.history[1:]):
+            elapsed_days = (following.at - current.at).total_seconds() / 86400
+            durations.setdefault(current.to_stage.value, []).append(elapsed_days)
+
+    return {
+        stage: round(sum(spans) / len(spans), 2) if spans else None
+        for stage, spans in durations.items()
+    }
+
+
 def funnel_for_job(job_id: str) -> dict:
     """Stage counts plus conversion between consecutive steps.
 
@@ -115,6 +137,7 @@ def funnel_for_job(job_id: str) -> dict:
         "active": sum(1 for entry in entries if entry.is_active),
         "steps": steps,
         "exits": {stage.value: current.get(stage, 0) for stage in EXIT_STAGES},
+        "average_days_in_stage": _average_days_in_stage(entries),
     }
 
 

@@ -1,6 +1,6 @@
 """Resume endpoints: upload (inline, async, bulk), retrieval, listing, and erasure."""
 from fastapi import APIRouter, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.db.candidate_store import get_candidate_store
@@ -8,6 +8,7 @@ from app.schemas.candidate import CandidateProfile
 from app.schemas.match import JobMatchResult
 from app.services.extraction.document_parser import get_document_parser
 from app.services.extraction.resume_extractor import get_resume_extractor
+from app.services.dedupe import find_all_duplicates, find_duplicates_for, merge_candidates
 from app.services.search.matcher import (
     delete_candidate,
     find_similar_candidates,
@@ -55,6 +56,17 @@ class SimilarCandidate(BaseModel):
     candidate_id: str
     score: float
     profile: CandidateProfile
+
+
+class DuplicatePair(BaseModel):
+    candidate_id: str
+    other_candidate_id: str
+    confidence: str
+    reasons: list[str]
+
+
+class MergeRequest(BaseModel):
+    absorb_candidate_id: str = Field(..., description="The record folded into this one and deleted")
 
 
 class CandidatePage(BaseModel):
@@ -158,6 +170,18 @@ async def read_task(task_id: str) -> ResumeTaskResponse:
     return ResumeTaskResponse(**get_task_state(task_id))
 
 
+@router.get("/duplicates", response_model=list[DuplicatePair])
+async def list_duplicates() -> list[DuplicatePair]:
+    """Likely same-person records across the whole pool, highest confidence first.
+
+    Surfaced rather than merged automatically: collapsing two records discards a
+    version of someone's history, which is a judgement call, not a cleanup task.
+    """
+    return [DuplicatePair(**vars(pair)) for pair in find_all_duplicates()]
+
+
+# Declared above "/{candidate_id}" deliberately: FastAPI matches in declaration
+# order, so a literal path registered afterwards is captured by the parameter.
 @router.get("/{candidate_id}", response_model=CandidateProfile)
 async def read_resume(candidate_id: str) -> CandidateProfile:
     record = get_candidate_store().get(candidate_id)
@@ -195,3 +219,21 @@ async def similar_candidates(
         SimilarCandidate(candidate_id=record.candidate_id, score=score, profile=record.profile)
         for record, score in find_similar_candidates(candidate_id, top_n=top_n)
     ]
+
+
+
+@router.get("/{candidate_id}/duplicates", response_model=list[DuplicatePair])
+async def candidate_duplicates(candidate_id: str) -> list[DuplicatePair]:
+    if get_candidate_store().get(candidate_id) is None:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    return [DuplicatePair(**vars(pair)) for pair in find_duplicates_for(candidate_id)]
+
+
+@router.post("/{candidate_id}/merge", response_model=CandidateProfile)
+async def merge_candidate(candidate_id: str, request: MergeRequest) -> CandidateProfile:
+    """Folds another record into this one, carrying its pipeline history across."""
+    try:
+        merged = merge_candidates(candidate_id, request.absorb_candidate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return merged.profile
