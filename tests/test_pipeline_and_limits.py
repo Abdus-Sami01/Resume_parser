@@ -507,3 +507,147 @@ def test_an_out_of_range_blend_is_rejected(monkeypatch, bad):
     with pytest.raises(Exception):
         get_settings()
     get_settings.cache_clear()
+
+
+# --- Match snapshots -------------------------------------------------------
+
+
+def test_shortlisting_records_why_the_candidate_was_added(board):
+    """Re-running the match later answers a different question; the pool has moved."""
+    client.post(f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 1})
+
+    snapshot = client.get(f"/jobs/{board['job_id']}/pipeline").json()["items"][0]["entry"][
+        "match_snapshot"
+    ]
+
+    assert snapshot is not None
+    assert snapshot["score"] > 0
+    assert "skills" in snapshot["evidence"]
+    assert snapshot["captured_at"]
+
+
+def test_the_snapshot_matches_the_score_that_selected_the_candidate(board):
+    """Recomputing instead of reusing could disagree with the ranking itself."""
+    ranked = client.post(f"/jobs/{board['job_id']}/match").json()[0]
+
+    client.post(f"/jobs/{board['job_id']}/pipeline/shortlist", json={"top_n": 1})
+    entry = client.get(f"/jobs/{board['job_id']}/pipeline").json()["items"][0]["entry"]
+
+    assert entry["match_snapshot"]["score"] == pytest.approx(
+        ranked["breakdown"]["weighted_total"], abs=1e-6
+    )
+
+
+def test_manually_added_candidates_also_get_a_snapshot(board):
+    client.post(
+        f"/jobs/{board['job_id']}/pipeline", json={"candidate_id": board["ids"]["Jane Doe"]}
+    )
+
+    entry = client.get(f"/jobs/{board['job_id']}/pipeline").json()["items"][0]["entry"]
+    assert entry["match_snapshot"] is not None
+
+
+def test_rescoring_reports_drift_after_the_posting_changes(board):
+    """A candidate scoring 0.61 then and 0.44 now means something moved."""
+    jane = board["ids"]["Jane Doe"]
+    client.post(f"/jobs/{board['job_id']}/pipeline", json={"candidate_id": jane})
+
+    client.put(
+        f"/jobs/{board['job_id']}",
+        json={
+            "title": "Backend Engineer",
+            "description": "Required:\nPython, PostgreSQL, Kafka, Spark, 10+ years experience\n",
+        },
+    )
+
+    drift = client.get(f"/jobs/{board['job_id']}/pipeline/{jane}/rescore").json()
+
+    assert drift["original"]["score"] > drift["current"]["score"]
+    assert drift["score_delta"] < 0
+    assert "kafka" in drift["current"]["evidence"]["skills"]["missing_required"]
+
+
+def test_rescoring_never_overwrites_the_original(board):
+    """The stored snapshot is the record of the decision; refreshing it destroys that."""
+    jane = board["ids"]["Jane Doe"]
+    client.post(f"/jobs/{board['job_id']}/pipeline", json={"candidate_id": jane})
+    original = client.get(f"/jobs/{board['job_id']}/pipeline").json()["items"][0]["entry"][
+        "match_snapshot"
+    ]["score"]
+
+    client.get(f"/jobs/{board['job_id']}/pipeline/{jane}/rescore")
+
+    still = client.get(f"/jobs/{board['job_id']}/pipeline").json()["items"][0]["entry"][
+        "match_snapshot"
+    ]["score"]
+    assert still == original
+
+
+def test_rescoring_someone_not_in_the_pipeline_is_a_404(board):
+    assert client.get(
+        f"/jobs/{board['job_id']}/pipeline/{board['ids']['Jane Doe']}/rescore"
+    ).status_code == 404
+
+
+def test_snapshots_survive_a_restart(tmp_path, monkeypatch):
+    from app.db.pipeline_store import SqlitePipelineStore
+    from app.schemas.match import MatchEvidence, ScoreBreakdown
+    from app.schemas.pipeline import MatchSnapshot, PipelineEntry
+    from app.schemas.match import (
+        CertificationEvidence,
+        EducationEvidence,
+        ExperienceEvidence,
+        SkillEvidence,
+    )
+
+    path = str(tmp_path / "pipeline.db")
+    snapshot = MatchSnapshot(
+        score=0.61,
+        breakdown=ScoreBreakdown(
+            skills=0.8, experience=1.0, education=1.0, certifications=1.0,
+            weighted_total=0.61, retrieval_score=0.0, rerank_score=0.4,
+        ),
+        evidence=MatchEvidence(
+            skills=SkillEvidence(missing_required=["kafka"]),
+            experience=ExperienceEvidence(),
+            education=EducationEvidence(),
+            certifications=CertificationEvidence(),
+        ),
+    )
+    SqlitePipelineStore(path).upsert(
+        PipelineEntry(job_id="j", candidate_id="c", match_snapshot=snapshot)
+    )
+
+    reopened = SqlitePipelineStore(path).get("j", "c")
+
+    assert reopened.match_snapshot.score == 0.61
+    assert reopened.match_snapshot.evidence.skills.missing_required == ["kafka"]
+
+
+def test_a_database_predating_the_snapshot_column_still_opens(tmp_path):
+    """CREATE TABLE IF NOT EXISTS is a no-op on an existing table, so the column
+    would never appear on a file that predates it."""
+    import json
+    import sqlite3
+
+    from app.db.pipeline_store import SqlitePipelineStore
+
+    path = str(tmp_path / "old.db")
+    legacy = sqlite3.connect(path)
+    legacy.executescript(
+        "CREATE TABLE pipeline (job_id TEXT NOT NULL, candidate_id TEXT NOT NULL,"
+        " stage TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,"
+        " history_json TEXT NOT NULL, PRIMARY KEY (job_id, candidate_id));"
+    )
+    legacy.execute(
+        "INSERT INTO pipeline VALUES ('j','c','interview','2026-01-01T00:00:00+00:00',"
+        "'2026-01-01T00:00:00+00:00', ?)",
+        (json.dumps([{"to_stage": "applied", "at": "2026-01-01T00:00:00+00:00"}]),),
+    )
+    legacy.commit()
+    legacy.close()
+
+    entry = SqlitePipelineStore(path).get("j", "c")
+
+    assert entry.stage.value == "interview"
+    assert entry.match_snapshot is None  # nothing to migrate, but the row still reads

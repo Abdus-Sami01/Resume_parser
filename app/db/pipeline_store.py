@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterator, Protocol
 
 from app.config import get_settings
-from app.schemas.pipeline import PipelineEntry, Stage, StageEvent
+from app.schemas.pipeline import MatchSnapshot, PipelineEntry, Stage, StageEvent
 
 
 class PipelineStoreProtocol(Protocol):
@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS pipeline (
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     history_json TEXT NOT NULL,
+    snapshot_json TEXT,
     PRIMARY KEY (job_id, candidate_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_job       ON pipeline (job_id);
@@ -89,6 +90,19 @@ class SqlitePipelineStore:
 
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
+            self._migrate(connection)
+
+    @staticmethod
+    def _migrate(connection: sqlite3.Connection) -> None:
+        """Adds columns introduced after a database was first created.
+
+        `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a new
+        column never appears on a database that predates it — every read then
+        fails on a file that looks perfectly valid.
+        """
+        existing = {row["name"] for row in connection.execute("PRAGMA table_info(pipeline)")}
+        if "snapshot_json" not in existing:
+            connection.execute("ALTER TABLE pipeline ADD COLUMN snapshot_json TEXT")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -106,6 +120,8 @@ class SqlitePipelineStore:
     def _to_entry(row: sqlite3.Row) -> PipelineEntry:
         import json
 
+        raw_snapshot = row["snapshot_json"] if "snapshot_json" in row.keys() else None
+
         return PipelineEntry(
             job_id=row["job_id"],
             candidate_id=row["candidate_id"],
@@ -113,6 +129,7 @@ class SqlitePipelineStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             history=[StageEvent.model_validate(event) for event in json.loads(row["history_json"])],
+            match_snapshot=MatchSnapshot.model_validate_json(raw_snapshot) if raw_snapshot else None,
         )
 
     def upsert(self, entry: PipelineEntry) -> PipelineEntry:
@@ -121,8 +138,8 @@ class SqlitePipelineStore:
         with self._connect() as connection:
             connection.execute(
                 "REPLACE INTO pipeline "
-                "(job_id, candidate_id, stage, created_at, updated_at, history_json) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(job_id, candidate_id, stage, created_at, updated_at, history_json, snapshot_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     entry.job_id,
                     entry.candidate_id,
@@ -130,6 +147,7 @@ class SqlitePipelineStore:
                     entry.created_at.isoformat(),
                     entry.updated_at.isoformat(),
                     json.dumps([event.model_dump(mode="json") for event in entry.history]),
+                    entry.match_snapshot.model_dump_json() if entry.match_snapshot else None,
                 ),
             )
         return entry

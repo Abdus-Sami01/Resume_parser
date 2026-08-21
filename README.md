@@ -205,6 +205,7 @@ a slow network.
 | `PATCH /jobs/{job_id}/pipeline/{candidate_id}` | Move a stage, appending to the audit trail. |
 | `DELETE /jobs/{job_id}/pipeline/{candidate_id}` | Remove from the pipeline. |
 | `GET /jobs/{job_id}/pipeline/funnel` | Stage counts and conversion between steps. |
+| `GET /jobs/{job_id}/pipeline/{candidate_id}/rescore` | Re-score and report drift from the stored snapshot. |
 | `GET /resumes/{candidate_id}/applications` | Every role this candidate is in play for. |
 
 **Analytics and taxonomy**
@@ -348,6 +349,36 @@ one decision, not twenty. One stale id does not discard the other nineteen moves
 failures come back per candidate, and every successful move still lands in the
 audit trail with its note and actor.
 
+### Why is this person here?
+
+Every pipeline entry stores the **score and evidence as they stood when the
+candidate was added**. Without it, a board weeks later carries a name and a stage
+and nothing else, and re-running the match cannot reconstruct the decision — the
+pool has changed, resumes have been updated, the taxonomy has been extended, and
+the scoring code itself may have moved:
+
+```
+score at shortlist : 0.6133   captured 2026-08-21T06:22:19
+missing required   : ['kafka']
+experience         : 6.58y relevant vs 0.0y required
+```
+
+Shortlisting reuses the score the match already computed rather than recomputing
+it, so the snapshot cannot disagree with the ranking that selected the candidate.
+
+`GET .../rescore` scores the pair again and reports the difference **without
+overwriting the original** — the drift is the interesting part, and the stored
+snapshot is the record of the decision:
+
+```
+posting rewritten to demand Kafka, Spark, Terraform and 10+ years
+
+original : 0.6133  missing=['kafka']
+current  : 0.4435  missing=['kafka', 'spark', 'terraform']
+drift    : -0.1698
+stored snapshot unchanged: 0.6133
+```
+
 ### Funnel
 
 `GET /jobs/{id}/pipeline/funnel` counts stages **ever reached**, not just current
@@ -487,6 +518,12 @@ outranks the real minimum. Either one quietly fails qualified candidates.
 
 ## Known limitations
 
+- **SQLite schema changes need a migration.** `CREATE TABLE IF NOT EXISTS` is a
+  no-op on an existing table, so a column added later never appears on a database
+  that predates it and every read fails on a file that looks perfectly valid. The
+  pipeline store checks `PRAGMA table_info` and issues `ALTER TABLE` on open; any
+  future column needs the same treatment, and there is a test that opens a
+  legacy-schema database to prove it.
 - **SQLite is single-writer.** `STORE_BACKEND=sqlite` is durable and fine for a
   single API process plus workers, but it serializes writes. A high-write
   deployment wants Postgres behind the same store interfaces.

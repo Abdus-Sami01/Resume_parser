@@ -170,6 +170,17 @@ async def move_stage(job_id: str, candidate_id: str, request: MoveStageRequest) 
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/jobs/{job_id}/pipeline/{candidate_id}/rescore")
+async def rescore_candidate(job_id: str, candidate_id: str) -> dict:
+    """Scores the pair again and reports the drift from the stored snapshot."""
+    _require_job(job_id)
+
+    try:
+        return pipeline_service.rescore(job_id, candidate_id)
+    except PipelineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.delete("/jobs/{job_id}/pipeline/{candidate_id}", status_code=204)
 async def remove_from_pipeline(job_id: str, candidate_id: str) -> None:
     if not pipeline_service.remove_candidate(job_id, candidate_id):

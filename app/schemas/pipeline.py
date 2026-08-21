@@ -9,6 +9,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from app.schemas.match import MatchEvidence, ScoreBreakdown
+
 
 class Stage(str, Enum):
     APPLIED = "applied"
@@ -47,6 +49,22 @@ class StageEvent(BaseModel):
     actor: str = ""
 
 
+class MatchSnapshot(BaseModel):
+    """The score and evidence as they stood when a candidate entered the pipeline.
+
+    Re-running the match later answers a different question: the pool has changed,
+    resumes have been updated, the taxonomy has been extended, and the scoring code
+    itself may have moved. Without a snapshot, "why was this person advanced?" is
+    unanswerable after the fact — which is exactly when a hiring decision gets
+    questioned.
+    """
+
+    score: float
+    breakdown: ScoreBreakdown
+    evidence: MatchEvidence
+    captured_at: datetime = Field(default_factory=_utcnow)
+
+
 class PipelineEntry(BaseModel):
     job_id: str
     candidate_id: str
@@ -54,6 +72,7 @@ class PipelineEntry(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
     history: list[StageEvent] = Field(default_factory=list)
+    match_snapshot: MatchSnapshot | None = None
 
     @property
     def is_active(self) -> bool:

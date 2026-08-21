@@ -3,15 +3,42 @@ from collections import Counter
 from datetime import datetime, timezone
 
 from app.db.pipeline_store import get_pipeline_store
-from app.schemas.pipeline import EXIT_STAGES, FUNNEL_ORDER, PipelineEntry, Stage, StageEvent
+from app.schemas.pipeline import (
+    EXIT_STAGES,
+    FUNNEL_ORDER,
+    MatchSnapshot,
+    PipelineEntry,
+    Stage,
+    StageEvent,
+)
 
 
 class PipelineError(ValueError):
     """Raised for a transition the caller should be told about rather than shown a 500."""
 
 
+def build_snapshot(job_id: str, candidate_id: str) -> MatchSnapshot | None:
+    """Scores the pair as it stands right now, for storing alongside the entry."""
+    from app.db.candidate_store import get_candidate_store
+    from app.db.job_store import get_job_store
+    from app.services.search.matcher import score_candidate_for_job
+
+    job = get_job_store().get(job_id)
+    record = get_candidate_store().get(candidate_id)
+    if job is None or record is None:
+        return None
+
+    breakdown, evidence = score_candidate_for_job(job.profile, record)
+    return MatchSnapshot(score=breakdown.weighted_total, breakdown=breakdown, evidence=evidence)
+
+
 def add_candidate(
-    job_id: str, candidate_id: str, stage: Stage = Stage.APPLIED, note: str = "", actor: str = ""
+    job_id: str,
+    candidate_id: str,
+    stage: Stage = Stage.APPLIED,
+    note: str = "",
+    actor: str = "",
+    snapshot: MatchSnapshot | None = None,
 ) -> PipelineEntry:
     store = get_pipeline_store()
 
@@ -26,8 +53,37 @@ def add_candidate(
         candidate_id=candidate_id,
         stage=stage,
         history=[StageEvent(from_stage=None, to_stage=stage, note=note, actor=actor)],
+        # Captured now, because the same match run later gives a different answer.
+        match_snapshot=snapshot or build_snapshot(job_id, candidate_id),
     )
     return store.upsert(entry)
+
+
+def rescore(job_id: str, candidate_id: str) -> dict:
+    """Compares the stored snapshot against a fresh score, without overwriting it.
+
+    Drift is the interesting part — a candidate who scored 0.61 when shortlisted
+    and 0.44 today means something moved: an updated resume, a rewritten posting,
+    or a change to the scoring itself. Overwriting the original would destroy the
+    only record of that.
+    """
+    store = get_pipeline_store()
+    entry = store.get(job_id, candidate_id)
+    if entry is None:
+        raise PipelineError("candidate is not in this pipeline")
+
+    current = build_snapshot(job_id, candidate_id)
+    original = entry.match_snapshot
+
+    return {
+        "job_id": job_id,
+        "candidate_id": candidate_id,
+        "original": original,
+        "current": current,
+        "score_delta": (
+            round(current.score - original.score, 4) if current and original else None
+        ),
+    }
 
 
 def move_candidate(
@@ -176,8 +232,15 @@ def shortlist_from_match(
             break
 
         try:
+            # The match already computed this; recomputing it would be wasteful and
+            # could disagree with the ranking that selected the candidate.
+            snapshot = MatchSnapshot(
+                score=result.final_score, breakdown=result.breakdown, evidence=result.evidence
+            )
             added.append(
-                add_candidate(job_id, result.candidate_id, stage, note=note, actor=actor)
+                add_candidate(
+                    job_id, result.candidate_id, stage, note=note, actor=actor, snapshot=snapshot
+                )
             )
         except PipelineError:
             skipped.append({"candidate_id": result.candidate_id, "reason": "already in pipeline"})

@@ -596,3 +596,17 @@ def find_similar_candidates(
             similar.append((record, hit.score))
 
     return similar[:top_n]
+
+
+def score_candidate_for_job(job: JobProfile, record: CandidateRecord):
+    """Scores a single pair, for callers that already know which candidate they mean.
+
+    Going through `match()` would run retrieval over the whole pool to rediscover
+    one candidate who is already in hand.
+    """
+    query_text = _job_searchable_text(job)
+    rerank_score = get_reranker().score_batch(query_text, [record.raw_text])[0]
+
+    return _score_breakdown(
+        job, record.profile, retrieval_score=0.0, rerank_score=rerank_score
+    )
