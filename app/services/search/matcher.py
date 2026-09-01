@@ -21,6 +21,7 @@ from app.schemas.match import (
     JobMatchResult,
     MatchEvidence,
     MatchResult,
+    ParseGap,
     ScoreBreakdown,
     SkillEvidence,
 )
@@ -31,6 +32,28 @@ from app.services.search.vector_store import get_vector_store, tokenize
 
 # Ranked so an over-qualified candidate is not rejected for exceeding the requirement.
 _DEGREE_RANK = {"associate": 1, "bachelor": 2, "master": 3, "phd": 4}
+
+# The scorer's central asymmetry, stated once because four components rely on it:
+# a signal the *parser* failed to recover is not evidence against the candidate.
+# An unreadable role title, a role with no end date, a skill no role text
+# evidences — each is a defect in our extraction, and charging it to whoever
+# submitted the resume would rank people by how conventionally their document was
+# typeset. So every such site credits in full and records a `ParseGap` saying what
+# it could not read and what it assumed instead. Absence of evidence is not
+# evidence of absence; the discounts elsewhere in this module apply only where the
+# resume actually said something.
+FULL_CREDIT_ON_PARSE_GAP = 1.0
+
+
+def _credit_gap(
+    gaps: list[ParseGap] | None, *, field: str, subject: str, assumption: str
+) -> float:
+    """Awards full credit for an unreadable signal and records why."""
+    if gaps is not None and not any(
+        gap.field == field and gap.subject == subject for gap in gaps
+    ):
+        gaps.append(ParseGap(field=field, subject=subject, assumption=assumption))
+    return FULL_CREDIT_ON_PARSE_GAP
 
 
 def _candidate_degree_rank(degree: str) -> int:
@@ -143,8 +166,9 @@ def _score_breakdown(
     job: JobProfile, candidate: CandidateProfile, *, retrieval_score: float, rerank_score: float
 ) -> tuple[ScoreBreakdown, MatchEvidence]:
     """Scores every component and returns the evidence each score was derived from."""
-    skills_score, skills_evidence = _skills_score(job, candidate)
-    experience_score, experience_evidence = _experience_score(job, candidate)
+    gaps: list[ParseGap] = []
+    skills_score, skills_evidence = _skills_score(job, candidate, gaps)
+    experience_score, experience_evidence = _experience_score(job, candidate, gaps)
     education_score, education_evidence = _education_score(job, candidate)
     certification_score, certification_evidence = _certifications_score(job, candidate)
 
@@ -176,6 +200,7 @@ def _score_breakdown(
         experience=experience_evidence,
         education=education_evidence,
         certifications=certification_evidence,
+        parse_gaps=gaps,
     )
     return breakdown, evidence
 
@@ -203,7 +228,9 @@ def _skill_last_used(candidate: CandidateProfile, skill: str, now: float) -> flo
     return last_used
 
 
-def _skills_score(job: JobProfile, candidate: CandidateProfile) -> tuple[float, SkillEvidence]:
+def _skills_score(
+    job: JobProfile, candidate: CandidateProfile, gaps: list[ParseGap] | None = None
+) -> tuple[float, SkillEvidence]:
     candidate_skills = set(candidate.skills)
     required = set(job.required_skills)
     preferred = set(job.preferred_skills)
@@ -223,10 +250,15 @@ def _skills_score(job: JobProfile, candidate: CandidateProfile) -> tuple[float, 
 
     # A matched skill counts less when the only role evidencing it ended long ago.
     credited = 0.0
+    unevidenced: list[str] = []
     for skill in evidence.matched_required:
         last_used = _skill_last_used(candidate, skill, now)
         if last_used is None:
-            credited += 1.0
+            # FULL_CREDIT_ON_PARSE_GAP: most resumes list skills in their own
+            # section and never mention them again, so "no role text names this"
+            # says nothing about when the candidate last used it.
+            unevidenced.append(skill)
+            credited += FULL_CREDIT_ON_PARSE_GAP
             continue
 
         years_ago = max(now - last_used, 0.0)
@@ -239,6 +271,14 @@ def _skills_score(job: JobProfile, candidate: CandidateProfile) -> tuple[float, 
             if years_ago > _STALE_AFTER_YEARS:
                 evidence.stale.append(skill)
         credited += factor
+
+    if unevidenced:
+        _credit_gap(
+            gaps,
+            field="experience.achievements",
+            subject=", ".join(unevidenced),
+            assumption="no role text evidences these skills, so none was discounted for age",
+        )
 
     required_hit = credited / len(required) if required else 1.0
     preferred_hit = len(evidence.matched_preferred) / len(preferred) if preferred else 1.0
@@ -269,15 +309,22 @@ def _current_decimal_year() -> float:
     return today.year + (today.month - 1) / 12
 
 
-def _recency_factor(entry, now: float) -> float:
+def _recency_factor(entry, now: float, gaps: list[ParseGap] | None = None) -> float:
     """Discounts work by how long ago it ended.
 
-    A role with no end date carries no signal, so it is treated as current —
-    the same principle as an unreadable role title: our parsing gap must not
-    become the candidate's penalty.
+    A role explicitly marked current is current. A role whose end date we simply
+    could not read is treated as current too, under FULL_CREDIT_ON_PARSE_GAP —
+    but only the second case is a parsing gap worth recording.
     """
-    if entry.is_current or entry.end_year is None:
+    if entry.is_current:
         return 1.0
+    if entry.end_year is None:
+        return _credit_gap(
+            gaps,
+            field="experience.end_year",
+            subject=entry.role or entry.company,
+            assumption="no end date was readable, so the role was counted as current",
+        )
 
     years_ago = max(now - entry.end_year, 0.0)
     if years_ago <= _RECENCY_GRACE_YEARS:
@@ -287,7 +334,7 @@ def _recency_factor(entry, now: float) -> float:
     return max(decayed, _RECENCY_FLOOR)
 
 
-def _role_relevance(job: JobProfile, entry) -> float:
+def _role_relevance(job: JobProfile, entry, gaps: list[ParseGap] | None = None) -> float:
     """How much a single role counts toward a posting's experience requirement.
 
     Relevance is read from the role title and its achievements, against the job
@@ -297,7 +344,12 @@ def _role_relevance(job: JobProfile, entry) -> float:
     """
     role_tokens = set(tokenize(entry.role))
     if not role_tokens or entry.role.strip().lower() in {"unknown", ""}:
-        return 1.0
+        return _credit_gap(
+            gaps,
+            field="experience.role",
+            subject=entry.company or "(unnamed employer)",
+            assumption="no role title was readable, so the tenure counted as fully relevant",
+        )
 
     title_tokens = set(tokenize(job.title))
     overlap = len(role_tokens & title_tokens) / len(title_tokens) if title_tokens else 0.0
@@ -314,7 +366,7 @@ def _role_relevance(job: JobProfile, entry) -> float:
 
 
 def _experience_score(
-    job: JobProfile, candidate: CandidateProfile
+    job: JobProfile, candidate: CandidateProfile, gaps: list[ParseGap] | None = None
 ) -> tuple[float, ExperienceEvidence]:
     """Scores tenure weighted by how relevant each role is.
 
@@ -332,8 +384,8 @@ def _experience_score(
     most_recent_relevant: float | None = None
 
     for entry in candidate.experience:
-        relevance = _role_relevance(job, entry)
-        recency = _recency_factor(entry, now)
+        relevance = _role_relevance(job, entry, gaps)
+        recency = _recency_factor(entry, now, gaps)
         relevant_years += entry.years * relevance * recency
 
         if relevance >= _RELEVANCE_THRESHOLD:

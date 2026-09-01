@@ -55,11 +55,30 @@ class CertificationEvidence(BaseModel):
     meets_all_required: bool = True
 
 
+class ParseGap(BaseModel):
+    """A signal the scorer wanted, could not read, and chose not to charge to the candidate.
+
+    Recording these keeps the "a parsing gap is not the candidate's fault" rule
+    honest in two directions. A reviewer sees why a role counted in full despite
+    looking thin, and the aggregate over the pool measures how well extraction is
+    actually doing — a rule that silently awards credit is indistinguishable from
+    a scorer that ignores the field entirely.
+    """
+
+    field: str = Field(description="Which profile field could not be read")
+    subject: str = Field("", description="Which role, skill or entry it was missing from")
+    assumption: str = Field(description="What was assumed in its place")
+
+
 class MatchEvidence(BaseModel):
     skills: SkillEvidence
     experience: ExperienceEvidence
     education: EducationEvidence
     certifications: CertificationEvidence = Field(default_factory=CertificationEvidence)
+    parse_gaps: list[ParseGap] = Field(
+        default_factory=list,
+        description="Signals missing from the resume that were credited rather than penalized",
+    )
 
 
 class ScoreBreakdown(BaseModel):

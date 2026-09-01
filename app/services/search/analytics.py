@@ -35,6 +35,30 @@ class SkillGap:
 
 
 @dataclass
+class FieldCoverage:
+    field: str
+    present: int
+    missing: int
+    coverage: float
+    scorer_assumption: str
+
+
+@dataclass
+class ThinProfile:
+    candidate_id: str
+    name: str
+    missing_fields: list[str]
+
+
+@dataclass
+class ParseCoverage:
+    total_candidates: int
+    total_roles: int
+    fields: list[FieldCoverage] = field(default_factory=list)
+    needs_review: list[ThinProfile] = field(default_factory=list)
+
+
+@dataclass
 class PoolOverview:
     total_candidates: int
     total_jobs: int  # open roles only
@@ -122,3 +146,103 @@ def _skill_gaps(skill_counts: Counter, total_candidates: int, limit: int) -> lis
     # Worst coverage first, breaking ties by how many postings demand the skill.
     gaps.sort(key=lambda gap: (gap.coverage, -gap.required_by_jobs))
     return gaps[:limit]
+
+
+# Each entry pairs a field with what the matcher does when it is missing. The
+# second half is the point: the scorer credits parse gaps in full
+# (`FULL_CREDIT_ON_PARSE_GAP`), so a pool with poor coverage produces scores that
+# look confident while resting on assumptions. This report is how that stays
+# visible instead of being silently absorbed into the rankings.
+_ROLE_FIELDS: list[tuple[str, str]] = [
+    ("experience.role", "tenure counts as fully relevant to any posting"),
+    ("experience.end_year", "the role is treated as current, so no recency discount applies"),
+    ("experience.achievements", "skills in that role are never dated, so none are marked stale"),
+]
+_PROFILE_FIELDS: list[tuple[str, str]] = [
+    ("email", "the candidate cannot be contacted from the record"),
+    ("experience", "no years requirement can be evaluated against them"),
+    ("education", "an education requirement scores zero rather than being assumed"),
+    ("skills", "every required skill reads as missing"),
+]
+
+
+def build_parse_coverage(review_limit: int = 10) -> ParseCoverage:
+    """How much of the pool the extractor actually recovered, field by field.
+
+    Matching quality is bounded by extraction quality, and the bound is invisible
+    from the match results themselves: a role whose title we could not read scores
+    as fully relevant, which is the right call per candidate and a misleading one
+    in aggregate. Reading coverage next to the rankings is what separates "these
+    candidates fit" from "we could not read enough to say otherwise".
+    """
+    records = get_candidate_store().all()
+
+    role_present = {name: 0 for name, _ in _ROLE_FIELDS}
+    profile_present = {name: 0 for name, _ in _PROFILE_FIELDS}
+    total_roles = 0
+    thin: list[ThinProfile] = []
+
+    for record in records:
+        profile = record.profile
+        missing: list[str] = []
+
+        for name, _ in _PROFILE_FIELDS:
+            value = getattr(profile, name, None)
+            if value:
+                profile_present[name] += 1
+            else:
+                missing.append(name)
+
+        for entry in profile.experience:
+            total_roles += 1
+            readable_role = entry.role and entry.role.strip().lower() not in {"", "unknown"}
+            if readable_role:
+                role_present["experience.role"] += 1
+            # A current role has no end date to recover, so counting it as missing
+            # would report the extractor failing on something that is not there.
+            if entry.is_current or entry.end_year is not None:
+                role_present["experience.end_year"] += 1
+            if entry.achievements:
+                role_present["experience.achievements"] += 1
+            else:
+                # Naming the role is what makes the queue actionable; when that is
+                # the field we failed to read, the employer is the next best handle.
+                label = entry.role if readable_role else (entry.company or "an unnamed role")
+                missing.append(f"achievements for {label}")
+
+        if missing:
+            thin.append(
+                ThinProfile(
+                    candidate_id=record.candidate_id, name=profile.name, missing_fields=missing
+                )
+            )
+
+    fields = [
+        _coverage(name, profile_present[name], len(records), assumption)
+        for name, assumption in _PROFILE_FIELDS
+    ] + [
+        _coverage(name, role_present[name], total_roles, assumption)
+        for name, assumption in _ROLE_FIELDS
+    ]
+
+    # Worst-parsed first: this list is a re-extraction queue, not a directory.
+    thin.sort(key=lambda profile: len(profile.missing_fields), reverse=True)
+
+    return ParseCoverage(
+        total_candidates=len(records),
+        total_roles=total_roles,
+        fields=fields,
+        needs_review=thin[:review_limit],
+    )
+
+
+def _coverage(name: str, present: int, total: int, assumption: str) -> FieldCoverage:
+    return FieldCoverage(
+        field=name,
+        present=present,
+        missing=total - present,
+        # An empty pool has nothing missing; reporting 0% coverage would read as
+        # a broken extractor rather than as no data.
+        coverage=round(present / total, 4) if total else 1.0,
+        scorer_assumption=assumption,
+    )

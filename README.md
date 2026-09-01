@@ -213,6 +213,7 @@ a slow network.
 | Endpoint | Purpose |
 |---|---|
 | `GET /analytics/overview` | Pool composition, experience bands, top skills, and skill gaps. |
+| `GET /analytics/parse-coverage` | How much of each resume the extractor recovered, and what the scorer assumed for the rest. |
 | `GET /jobs/{job_id}/match/export` | Shortlist as CSV, evidence columns included. |
 | `GET`/`POST /skills` | List the skill taxonomy, or add a skill and its aliases. |
 | `DELETE /skills/{skill}` | Remove a skill from the taxonomy. |
@@ -289,6 +290,29 @@ python       wanted by 1 job(s); 2 candidate(s) have it; coverage 50%
 ```
 
 That names what to source for, rather than restating what you already have.
+
+## Parse coverage
+
+Matching quality is bounded by extraction quality, and the bound is invisible from
+the match results themselves. `GET /analytics/parse-coverage` makes it visible,
+pairing each field with what the scorer does when it is missing:
+
+```
+candidates=3 roles=3
+  email                     67%  missing=1  (the candidate cannot be contacted from the record)
+  education                  0%  missing=3  (an education requirement scores zero rather than being assumed)
+  experience.role           67%  missing=1  (tenure counts as fully relevant to any posting)
+  experience.end_year      100%  missing=0  (the role is treated as current, so no recency discount applies)
+  experience.achievements   33%  missing=2  (skills in that role are never dated, so none are marked stale)
+```
+
+The second column is the point. A coverage number on its own is trivia; read next
+to the assumption it buys, it says how much of the ranking rests on things the
+resume never established. `needs_review` returns the worst-parsed profiles first,
+which is a re-extraction queue rather than a directory.
+
+A role marked *current* is not counted as a missing end date — nothing failed to
+parse there, the resume said the role is ongoing.
 
 ## Extending the skill taxonomy
 
@@ -710,8 +734,30 @@ missing — but counts less, and `stale` names it so the discount is visible.
 
 The third row is the important one. Most resumes list skills in a section and
 never mention them again, so "no evidence" has to mean **no discount** rather than
-"assume it is old". Same principle as the unreadable role title and the missing
-end date: a gap in our parsing must never become the candidate's penalty.
+"assume it is old".
+
+## A parsing gap is not the candidate's fault
+
+That last row is one instance of the rule the whole scorer is built on. An
+unreadable role title, a role with no end date, a skill no role text evidences —
+each is a defect in *our* extraction, and charging it to the candidate would rank
+people by how conventionally their resume was typeset. So every such site credits
+in full (`FULL_CREDIT_ON_PARSE_GAP`) and records a `ParseGap` on the match evidence
+saying what could not be read and what was assumed instead:
+
+```
+Bo Ng   total=0.432  skills=1.00  exp=0.41
+    experience.role           [Acme Corp]      no role title was readable, so the tenure counted as fully relevant
+    experience.achievements   [kafka, python]  no role text evidences these skills, so none was discounted for age
+```
+
+Recording it is what keeps the rule honest. A reviewer sees why a thin-looking
+role counted in full, and `GET /analytics/parse-coverage` aggregates the same
+gaps across the pool — because a rule that silently awards credit is
+indistinguishable from a scorer that ignores the field entirely.
+
+The discounts elsewhere in the scorer apply only where the resume actually said
+something. Absence of evidence is not evidence of absence.
 
 ## The reranker blend
 

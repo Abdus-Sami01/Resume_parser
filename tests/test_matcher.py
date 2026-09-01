@@ -789,3 +789,106 @@ def test_a_missing_skill_is_still_reported_as_missing_not_stale():
 
     assert evidence.missing_required == ["kafka"]
     assert "kafka" not in evidence.stale
+
+
+# --- Parse gaps ------------------------------------------------------------
+#
+# Every one of these asserts the same rule from a different angle: a signal the
+# extractor failed to recover is credited to the candidate, and the assumption is
+# recorded rather than made silently.
+
+
+def _gaps(job: JobProfile, candidate: CandidateProfile):
+    from app.services.search.matcher import _score_breakdown
+
+    _, evidence = _score_breakdown(job, candidate, retrieval_score=0.0, rerank_score=0.0)
+    return {gap.field: gap for gap in evidence.parse_gaps}
+
+
+def test_an_unreadable_role_title_counts_in_full_and_is_recorded():
+    candidate = CandidateProfile(
+        name="Ann",
+        experience=[Experience(company="Acme", role="", years=6.0, is_current=True)],
+    )
+    score, _ = _experience_score(BACKEND_JOB, candidate)
+    gaps = _gaps(BACKEND_JOB, candidate)
+
+    assert score == 1.0
+    assert gaps["experience.role"].subject == "Acme"
+    assert "fully relevant" in gaps["experience.role"].assumption
+
+
+def test_a_missing_end_date_counts_as_current_and_is_recorded():
+    candidate = CandidateProfile(
+        name="Bo",
+        experience=[
+            Experience(company="Acme", role="Backend Engineer", years=6.0, start_year=2001.0)
+        ],
+    )
+    score, _ = _experience_score(BACKEND_JOB, candidate)
+    gaps = _gaps(BACKEND_JOB, candidate)
+
+    assert score == 1.0  # a 2001 role would otherwise be discounted almost to the floor
+    assert gaps["experience.end_year"].subject == "Backend Engineer"
+
+
+def test_a_role_explicitly_marked_current_is_not_a_parse_gap():
+    """`is_current` is something the resume said, not something we failed to read."""
+    candidate = CandidateProfile(
+        name="Cy",
+        experience=[
+            Experience(company="Acme", role="Backend Engineer", years=6.0, is_current=True)
+        ],
+    )
+
+    assert _gaps(BACKEND_JOB, candidate) == {}
+
+
+def test_unevidenced_skills_are_credited_and_named_in_one_gap():
+    profile = _parsed(
+        "Dee\nEngineer, Nova, Jan 2020 - Present\n- Did engineering things\nSkills: Python, Kafka\n"
+    )
+    gaps = _gaps(SKILL_JOB, profile)
+
+    assert set(gaps["experience.achievements"].subject.split(", ")) == {"python", "kafka"}
+    assert "discounted" in gaps["experience.achievements"].assumption
+
+
+def test_a_dated_role_that_evidences_its_skills_reports_no_gaps():
+    profile = _parsed(
+        "Eve\nBackend Engineer, Acme, Jan 2020 - Dec 2024\n"
+        "- Built Python services and Kafka consumers\n"
+        "Skills: Python, Kafka\n"
+    )
+
+    assert _gaps(SKILL_JOB, profile) == {}
+
+
+def test_the_same_gap_is_not_reported_twice_for_one_role():
+    candidate = CandidateProfile(
+        name="Fay",
+        experience=[Experience(company="Acme", role="", years=3.0)],
+    )
+    fields = [gap.field for gap in _gaps(BACKEND_JOB, candidate).values()]
+
+    assert sorted(fields) == ["experience.end_year", "experience.role"]
+
+
+def test_parse_gaps_reach_the_api():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    api = TestClient(app)
+    api.post(
+        "/resumes",
+        files={"file": ("gy.txt", b"Gy Ito\ngy@x.com\nEngineer, Nova, Jan 2020 - Present\nSkills: Python\n", "text/plain")},
+    )
+    job = api.post(
+        "/jobs",
+        json={"title": "Backend Engineer", "description": "Requirements:\n- Python\n"},
+    ).json()
+    results = api.post(f"/jobs/{job['job_id']}/match").json()
+
+    assert results
+    assert any(gap["field"] for gap in results[0]["evidence"]["parse_gaps"])

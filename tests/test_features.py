@@ -279,3 +279,88 @@ def test_status_endpoints_404_on_an_unknown_job():
 def test_an_invalid_status_is_rejected():
     job_id = client.post("/jobs", json={"title": "Eng", "description": "Required:\nPython\n"}).json()["job_id"]
     assert client.patch(f"/jobs/{job_id}/status", json={"status": "banana"}).status_code == 422
+
+
+# --- Parse coverage -------------------------------------------------------
+
+
+def _coverage(review: int = 10) -> dict:
+    response = client.get("/analytics/parse-coverage", params={"review": review})
+    assert response.status_code == 200
+    return {row["field"]: row for row in response.json()["fields"]}
+
+
+def test_parse_coverage_reports_every_scored_field(pool):
+    fields = _coverage()
+
+    assert set(fields) == {
+        "email",
+        "experience",
+        "education",
+        "skills",
+        "experience.role",
+        "experience.end_year",
+        "experience.achievements",
+    }
+
+
+def test_parse_coverage_names_what_the_scorer_assumes_for_each_gap(pool):
+    """A coverage number without its consequence is trivia; the pairing is the report."""
+    assert "recency" in _coverage()["experience.end_year"]["scorer_assumption"]
+
+
+def test_a_pool_with_no_bullets_reports_zero_achievement_coverage(pool):
+    """Every fixture resume is a title and a skills line, so no role carries bullets."""
+    achievements = _coverage()["experience.achievements"]
+
+    assert achievements["present"] == 0
+    assert achievements["coverage"] == 0.0
+
+
+def test_bullets_lift_achievement_coverage():
+    client.post(
+        "/resumes",
+        files={
+            "file": (
+                "ann.txt",
+                b"Ann Lee\nann@x.com\nBackend Engineer, Acme, Jan 2020 - Dec 2023\n"
+                b"- Built Python services\nSkills: Python\n",
+                "text/plain",
+            )
+        },
+    )
+
+    assert _coverage()["experience.achievements"]["coverage"] == 1.0
+
+
+def test_a_current_role_is_not_counted_as_a_missing_end_date():
+    """Nothing failed to parse: the resume says the role is ongoing."""
+    client.post(
+        "/resumes",
+        files={
+            "file": (
+                "bo.txt",
+                b"Bo Ng\nbo@x.com\nBackend Engineer, Acme, Jan 2020 - Present\nSkills: Python\n",
+                "text/plain",
+            )
+        },
+    )
+
+    assert _coverage()["experience.end_year"]["missing"] == 0
+
+
+def test_needs_review_is_ordered_worst_first(pool):
+    review = client.get("/analytics/parse-coverage").json()["needs_review"]
+
+    assert review
+    counts = [len(entry["missing_fields"]) for entry in review]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_parse_coverage_on_an_empty_pool_reports_full_coverage_not_zero():
+    """With nothing stored, 0% would read as a broken extractor rather than no data."""
+    body = client.get("/analytics/parse-coverage").json()
+
+    assert body["total_candidates"] == 0
+    assert body["needs_review"] == []
+    assert all(row["coverage"] == 1.0 for row in body["fields"])
