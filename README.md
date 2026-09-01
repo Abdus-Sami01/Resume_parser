@@ -641,6 +641,37 @@ Ben Ray  total=0.4673  edu=0.60 cert=0.00   B.A. History, no cert
 Cara Yu  total=0.4403  edu=0.00 cert=0.00   no degree, no cert
 ```
 
+### Reading the education line
+
+The scoring above is only as good as what comes off the resume, and the parsing
+had three failure modes that all read as "this candidate has no degree":
+
+- **Schools that do not say "University".** Matching on the keyword alone lost
+  MIT, Caltech, INSEAD and IIT Bombay. When no segment carries a keyword the
+  school is now recovered positionally instead — on `<degree>, <school>, <year>`
+  it is the segment that is neither the degree nor the year.
+- **Fields of study written without a separator.** "M.S. Electrical Engineering"
+  and "B.A. Economics" have no "in" to key on, while taking the *first* separator
+  turned "Bachelor of Science in Computer Science" into a field of "Science in
+  Computer Science". The qualifier that belongs to the degree's own name is
+  dropped first, which leaves a subject like "History of Science" intact.
+- **Lines with no comma at all.** "Georgia Institute of Technology - B.S.
+  Computer Science (2015)" collapsed into one blob that became the degree *and*
+  the school. Spaced hyphens and dashes now separate fields too.
+
+The opposite failure was live as well: `MS` and `BA` are degree abbreviations and
+ordinary words, so `Skills: MS Office, MS SQL Server` parsed as a qualification
+and fed the education score. Undotted two-letter forms are now matched only in
+uppercase, and only on a line that corroborates itself with a year, a school, or
+an Education heading; skills/tools/projects labels and bullets are excluded
+outright.
+
+```
+Skills: MS Office, MS SQL Server, Python        -> no education entry
+MS Computer Science, Cornell University, 2019   -> MS Computer Science @ Cornell University
+Education / MS Computer Science                 -> MS Computer Science
+```
+
 ## Duplicate candidates
 
 Content-hash deduplication catches the same file uploaded twice. It cannot catch

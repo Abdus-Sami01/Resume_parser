@@ -20,14 +20,50 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE_RE = re.compile(r"(\+?\d[\d\-\s().]{7,}\d)")
 _YEARS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*years?", re.IGNORECASE)
 
+# Unambiguous degree names: a spelled-out word, or an abbreviation whose dots or
+# extra letters make it a degree and nothing else.
 _DEGREE_RE = re.compile(
-    r"\b(ph\.?d|doctorate|m\.?b\.?a|m\.?sc?|b\.?sc?|b\.?a|b\.?tech|m\.?tech|"
+    r"\b(ph\.?d|d\.?phil|doctorate|m\.?b\.?a|b\.?b\.?a|m\.?sc|b\.?sc|b\.?tech|m\.?tech|"
+    r"b\.?eng|m\.?eng|ll\.?b|ll\.?m|b\.?ed|"
+    r"b\.[sae]\.?|m\.[sae]\.?|"
     r"master(?:'?s)?|bachelor(?:'?s)?|associate(?:'?s)?)\b",
     re.IGNORECASE,
 )
-_INSTITUTION_RE = re.compile(r"\b(university|college|institute|school|academy)\b", re.IGNORECASE)
+# "MS Office", "BA testing", "ME" — undotted two-letter forms are ordinary words
+# as often as they are degrees, so they are matched only in uppercase and only on
+# a line that corroborates itself with a year, a school, or an Education heading.
+_AMBIGUOUS_DEGREE_RE = re.compile(r"\b(BS|MS|BA|MA|BE|ME)\b")
+# A degree token inside a skills or projects list is a product name, not a degree.
+_NON_EDUCATION_LABEL_RE = re.compile(
+    r"^\s*(skills?|technologies|tools|languages|frameworks|projects?|summary|profile|"
+    r"objective|experience|employment|certifications?|awards?|interests?|publications?|"
+    r"references?)\s*:",
+    re.IGNORECASE,
+)
+_EDUCATION_HEADER_RE = re.compile(r"^\s*(education|academics?|qualifications?)\s*:?\s*$", re.IGNORECASE)
+_INSTITUTION_RE = re.compile(
+    r"\b(universit(?:y|e|at|ies)|college|institute|school|academy|polytechnic)\b", re.IGNORECASE
+)
+# Pulls the school's name out of a segment that also carries other text, so
+# "Georgia Institute of Technology - B.S." does not become its own institution.
+_INSTITUTION_PHRASE_RE = re.compile(
+    r"((?:[A-Z][\w.&'\u2019-]*\s+){0,4}"
+    r"(?:Universit(?:y|e|ies)|College|Institute|School|Academy|Polytechnic)"
+    r"(?:\s+of\s+[A-Z][\w.&'\u2019-]*(?:\s+[A-Z][\w.&'\u2019-]*){0,2})?)"
+)
 _GRAD_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
-_FIELD_RE = re.compile(r"\b(?:in|of)\s+([A-Za-z][A-Za-z\s&]{2,40}?)(?=\s*[,;|]|\s+at\b|$)", re.IGNORECASE)
+# "Bachelor of Science", "Master of Arts" — the qualifier is part of the degree's
+# name, not the subject studied, so it must not be reported as a field of study.
+_DEGREE_QUALIFIER_RE = re.compile(
+    r"^\s*of\s+(?:applied\s+science|business\s+administration|science|arts|engineering|"
+    r"technology|philosophy|commerce|laws?|education)\b",
+    re.IGNORECASE,
+)
+_TRAILING_YEAR_RE = re.compile(r"[\s,(\[|-]*\b(?:19|20)\d{2}\b\s*[)\]]?\s*$")
+# Splits a line into its fields. Spaced hyphens and en/em dashes matter: a line
+# written "Georgia Institute of Technology - B.S. Computer Science" carries no
+# comma at all, and without this the degree and the school collapse into one blob.
+_EDUCATION_SEPARATOR_RE = re.compile(r"[,;|\u2022]|\s+[-\u2013\u2014]\s+")
 _CERT_HEADER_RE = re.compile(r"^\s*certification[s]?\s*:?\s*$", re.IGNORECASE)
 _CERT_INLINE_RE = re.compile(r"^\s*certification[s]?\s*:\s*(.+)$", re.IGNORECASE)
 _CERT_PHRASE_RE = re.compile(r"\bcertified\b|\bcertificate\b", re.IGNORECASE)
@@ -52,6 +88,59 @@ _COMPANY_SUFFIX_RE = re.compile(
     r"\b(inc|corp|corporation|ltd|llc|gmbh|plc|technologies|labs|systems|solutions|group)\b\.?",
     re.IGNORECASE,
 )
+
+
+def _degree_token(text: str):
+    """The degree named in a piece of text, unambiguous form preferred."""
+    return _DEGREE_RE.search(text) or _AMBIGUOUS_DEGREE_RE.search(text)
+
+
+def _institution_from(segments: list[str], degree_segment: str) -> str:
+    """The school on an education line, which is often not the segment naming a keyword.
+
+    Matching on "University"/"College" alone loses every school that does not say
+    so — MIT, Caltech, INSEAD, IIT Bombay — and those are not rare enough to write
+    off. When no segment carries a keyword the school is recovered positionally
+    instead: on `<degree>, <school>, <year>` it is simply the segment that is
+    neither the degree nor the year.
+    """
+    for segment in segments:
+        if not _INSTITUTION_RE.search(segment):
+            continue
+        # The keyword segment can also carry the degree ("Georgia Institute of
+        # Technology - B.S."), so the name is cut out rather than taken whole.
+        phrase = _INSTITUTION_PHRASE_RE.search(segment)
+        return phrase.group(1).strip() if phrase else segment
+
+    for segment in segments:
+        if segment == degree_segment or _degree_token(segment):
+            continue
+        stripped = _TRAILING_YEAR_RE.sub("", segment).strip()
+        # A bare year segment reduces to nothing; anything left is a name.
+        if stripped and any(character.isalpha() for character in stripped):
+            return stripped
+
+    return ""
+
+
+def _field_of_study_from(degree_segment: str) -> str:
+    """What was studied, read as whatever follows the degree token.
+
+    Requiring an "in"/"of" separator missed every resume that omits one — "M.S.
+    Electrical Engineering", "B.A. Economics" — while accepting the first one
+    turned "Bachelor of Science in Computer Science" into "Science in Computer
+    Science". Dropping the qualifier that belongs to the degree's own name fixes
+    both, and leaves a field like "History of Science" intact.
+    """
+    match = _degree_token(degree_segment)
+    if match is None:
+        return ""
+
+    remainder = _TRAILING_YEAR_RE.sub("", degree_segment[match.end() :])
+    remainder = remainder.strip(" .,-\u2013\u2014")
+    # "of Science" names the degree, not the subject.
+    remainder = _DEGREE_QUALIFIER_RE.sub("", remainder, count=1).strip(" .,-")
+    return re.sub(r"^(?:in|of)\b", "", remainder, flags=re.IGNORECASE).strip(" .,-")
 
 
 class ResumeExtractor(Protocol):
@@ -217,26 +306,57 @@ class HeuristicResumeExtractor:
 
     @staticmethod
     def _extract_education(lines: list[str]) -> list[Education]:
-        """Any line naming a degree becomes one Education entry."""
+        """Lines naming a degree become Education entries, once they corroborate it.
+
+        Treating every degree token as a degree turned "Skills: MS Office, MS SQL"
+        into a qualification and a bullet mentioning "BA workshops" into another,
+        both of which then fed the education score. A match now has to be either
+        unambiguous on its own or backed by a year, a school, or an Education
+        heading.
+        """
         entries: list[Education] = []
+        in_education_section = False
 
         for line in lines:
-            degree_match = _DEGREE_RE.search(line)
-            if not degree_match:
+            if _EDUCATION_HEADER_RE.match(line):
+                in_education_section = True
                 continue
 
-            segments = [segment.strip() for segment in re.split(r"[,;|]", line) if segment.strip()]
-            institution = next((s for s in segments if _INSTITUTION_RE.search(s)), "")
-            degree_segment = next((s for s in segments if _DEGREE_RE.search(s)), degree_match.group(0))
+            unambiguous = _DEGREE_RE.search(line)
+            degree_match = unambiguous or _AMBIGUOUS_DEGREE_RE.search(line)
+            labelled_elsewhere = _NON_EDUCATION_LABEL_RE.match(line)
 
-            field_match = _FIELD_RE.search(degree_segment)
+            # Another section's heading closes the education block — but a degree
+            # line is not a heading however much it looks like one, which is what
+            # dropped "MS Computer Science" listed under an Education header.
+            if labelled_elsewhere or (degree_match is None and _SECTION_HEADER_RE.match(line)):
+                in_education_section = False
+
+            if degree_match is None or labelled_elsewhere or _BULLET_RE.match(line):
+                continue
+
+            if unambiguous is None and not (
+                in_education_section
+                or _GRAD_YEAR_RE.search(line)
+                or _INSTITUTION_RE.search(line)
+            ):
+                continue
+
+            segments = [
+                segment.strip()
+                for segment in _EDUCATION_SEPARATOR_RE.split(line)
+                if segment and segment.strip()
+            ]
+            degree_segment = next(
+                (s for s in segments if _degree_token(s)), degree_match.group(0)
+            )
             year_match = _GRAD_YEAR_RE.search(line)
 
             entries.append(
                 Education(
-                    institution=institution,
-                    degree=degree_segment,
-                    field_of_study=field_match.group(1).strip() if field_match else "",
+                    institution=_institution_from(segments, degree_segment),
+                    degree=_TRAILING_YEAR_RE.sub("", degree_segment).strip() or degree_segment,
+                    field_of_study=_field_of_study_from(degree_segment),
                     graduation_year=int(year_match.group(0)) if year_match else None,
                 )
             )

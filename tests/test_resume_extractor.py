@@ -233,3 +233,88 @@ def test_wrapped_bullets_are_joined():
 def test_a_role_without_bullets_yields_no_achievements():
     profile = HeuristicResumeExtractor().extract("Ann\nEngineer, Acme, Jan 2020 - Present\n")
     assert profile.experience[0].achievements == []
+
+
+# --- Education --------------------------------------------------------------
+
+
+def _education(line: str) -> list:
+    return HeuristicResumeExtractor().extract(f"Ann Lee\nann@x.com\n{line}\n").education
+
+
+@pytest.mark.parametrize(
+    "line, institution",
+    [
+        ("B.S. in Computer Science, Stanford University, 2018", "Stanford University"),
+        ("Bachelor of Science in Computer Science, MIT, 2016", "MIT"),
+        ("M.S. Electrical Engineering, Caltech, 2019", "Caltech"),
+        ("MBA, INSEAD, 2020", "INSEAD"),
+        ("B.Tech in Information Technology, IIT Bombay, 2014", "IIT Bombay"),
+        ("BSc Computer Engineering | University of Toronto | 2017", "University of Toronto"),
+    ],
+)
+def test_schools_without_the_word_university_are_still_recovered(line, institution):
+    """Keyword matching alone loses MIT, Caltech and INSEAD, which is not a rare tail."""
+    assert _education(line)[0].institution == institution
+
+
+def test_a_school_named_before_the_degree_is_not_swallowed_into_it():
+    """No comma appears on this line at all; only the spaced hyphen separates the fields."""
+    entry = _education("Georgia Institute of Technology - B.S. Computer Science (2015)")[0]
+
+    assert entry.institution == "Georgia Institute of Technology"
+    assert entry.degree == "B.S. Computer Science"
+    assert entry.graduation_year == 2015
+
+
+@pytest.mark.parametrize(
+    "line, field",
+    [
+        ("B.S. in Computer Science, Stanford University, 2018", "Computer Science"),
+        # The first "in"/"of" belongs to the degree's own name, not the subject.
+        ("Bachelor of Science in Computer Science, MIT, 2016", "Computer Science"),
+        # No separator at all between the abbreviation and the subject.
+        ("M.S. Electrical Engineering, Caltech, 2019", "Electrical Engineering"),
+        ("B.A. Economics, University of Oxford, 2012", "Economics"),
+        # A subject that legitimately contains "of".
+        ("B.A. in History of Science, Yale, 2011", "History of Science"),
+    ],
+)
+def test_field_of_study_is_read_with_or_without_a_separator(line, field):
+    assert _education(line)[0].field_of_study == field
+
+
+@pytest.mark.parametrize(
+    "line", ["Bachelor of Science, Rice University, 2010", "MBA, INSEAD, 2020"]
+)
+def test_a_degree_that_names_no_subject_reports_no_field(line):
+    assert _education(line)[0].field_of_study == ""
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Skills: MS Office, MS SQL Server, Python",
+        "Tools: BA workbench",
+        "- Ran BA workshops for the product team",
+    ],
+)
+def test_product_names_and_bullets_do_not_become_qualifications(line):
+    """"MS Office" is a degree token in a skills list, and scored as one."""
+    assert _education(line) == []
+
+
+def test_an_undotted_abbreviation_counts_once_the_line_corroborates_it():
+    entry = _education("MS Computer Science, Cornell University, 2019")[0]
+
+    assert entry.degree == "MS Computer Science"
+    assert entry.institution == "Cornell University"
+
+
+def test_an_education_heading_corroborates_a_degree_that_carries_no_year_or_school():
+    profile = HeuristicResumeExtractor().extract(
+        "Ann Lee\nann@x.com\nEducation\nMS Computer Science\nSkills: Python\n"
+    )
+
+    assert [e.degree for e in profile.education] == ["MS Computer Science"]
+    assert "python" in profile.skills
